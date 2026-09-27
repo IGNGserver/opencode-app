@@ -1,0 +1,103 @@
+name: 发布 OpenCode Mobile Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已有的版本 tag，例如 v0.1.0-rc.1'
+        required: true
+        type: string
+      release_type:
+        description: '发布类型；未明确指定时使用 pre-release'
+        required: true
+        default: pre-release
+        type: choice
+        options:
+          - pre-release
+          - release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TYPE: ${{ inputs.release_type || 'pre-release' }}
+    steps:
+      - name: 检出版本
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: 设置 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 设置 Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: companion/package-lock.json
+
+      - name: 构建并验证 Android
+        run: |
+          ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleDebug
+
+      - name: 验证 companion
+        working-directory: companion
+        run: |
+          npm ci
+          npm test
+
+      - name: 生成中文 Release 说明
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${RELEASE_TAG}.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "缺少中文版本说明：$notes" >&2
+            exit 1
+          fi
+          {
+            echo "# OpenCode Mobile ${RELEASE_TAG}"
+            echo
+            if [[ "$RELEASE_TYPE" == "release" ]]; then
+              echo "这是 OpenCode Mobile 正式版本。"
+            else
+              echo "这是 OpenCode Mobile 预发布版本，用于验证本次更新。"
+            fi
+            echo
+            cat "$notes"
+            echo
+            echo "## 自动验证"
+            echo
+            echo "- Android 单元测试和 Debug APK 构建已由 GitHub Actions 执行。"
+            echo "- companion 测试已由 GitHub Actions 执行。"
+          } > release-notes.md
+
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="/tmp/opencode-mobile-gradle/app/outputs/apk/debug/app-debug.apk"
+          if [[ ! -f "$apk" ]]; then
+            echo "APK 不存在：$apk" >&2
+            exit 1
+          fi
+          args=("$RELEASE_TAG" "$apk" --title "OpenCode Mobile ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag)
+          if [[ "$RELEASE_TYPE" == "pre-release" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
