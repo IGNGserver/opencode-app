@@ -255,7 +255,8 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
           for (const device of deviceIds) {
             if (isExpired(device)) continue
             const payload = {
-              version: 2,
+              // FCM data messages must be a flat map of string values.
+              version: '2',
               sessionId: event.sessionId,
               serverId: device.profileId || device.serverId,
               directory: String(event.directory ?? '').slice(0, 500),

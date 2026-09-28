@@ -127,6 +127,9 @@ test('registration authenticates and event delivery only targets registered devi
     assert.equal(sent[0].data.serverId, 'profile-a')
     assert.equal(sent[0].data.phase, 'WAITING_PERMISSION')
     assert.equal(sent[0].data.title, 'Build task')
+    // FCM data payloads must be a flat map of string values.
+    assert.equal(typeof sent[0].data.version, 'string')
+    assert.equal(sent[0].data.version, '2')
   } finally { server.close() }
 })
 
