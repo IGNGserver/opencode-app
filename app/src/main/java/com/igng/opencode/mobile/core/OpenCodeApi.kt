@@ -33,14 +33,20 @@ data class ServerEvent(val id: String = "", val directory: String, val type: Str
 class ApiException(val status: Int, message: String, val responseBody: String = "") : IOException(message)
 enum class ServerProtocol { UNKNOWN, V1, V2 }
 
-class OpenCodeApi(private val profile: ServerProfile, private val credentials: ServerCredentials) {
+class OpenCodeApi(
+  private val profile: ServerProfile,
+  private val credentials: ServerCredentials,
+  /** Whole-call deadline. Background callers (e.g. notification actions) pass a small value to stay
+   *  inside the short lifetime Android grants a BroadcastReceiver; foreground callers keep the default. */
+  callTimeoutSeconds: Long = 60
+) {
   constructor(profile: ServerProfile, password: String) : this(profile, ServerCredentials(profile.username, password))
 
   private val base: HttpUrl = requireNotNull(profile.url.trimEnd('/').toHttpUrlOrNull()) { "服务器地址无效" }
   private val client = OkHttpClient.Builder()
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(25, TimeUnit.SECONDS)
-    .callTimeout(60, TimeUnit.SECONDS)
+    .callTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
     .connectionPool(SharedHttp.connectionPool)
     .dispatcher(SharedHttp.dispatcher)
     .build()
@@ -56,7 +62,9 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
   }
 
   private fun url(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): HttpUrl {
-    val builder = base.newBuilder().addPathSegments(path.trimStart('/'))
+    // The path is already percent-encoded segment-by-segment (see [segment]/[encodedPath]); using the
+    // encoded variant avoids OkHttp re-encoding '%' and producing e.g. '%2520' for ids containing spaces.
+    val builder = base.newBuilder().addEncodedPathSegments(path.trimStart('/'))
     if (!directory.isNullOrBlank()) builder.addQueryParameter("directory", directory)
     query.forEach { (key, value) -> builder.addQueryParameter(key, value) }
     return builder.build()
@@ -144,6 +152,8 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     return result
   }
   private fun segment(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+  /** Percent-encodes each `/`-separated segment so the result can be passed to [url] unchanged. */
+  private fun encodedPath(value: String): String = value.trim('/').split('/').joinToString("/") { segment(it) }
   private fun locationQuery(directory: String): Map<String, String> = mapOf("location[directory]" to directory)
   fun detectedProtocol(): ServerProtocol = protocol
 
@@ -397,7 +407,7 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
   suspend fun fileContent(directory: String, path: String): FileContent = when (ensureProtocol()) {
     ServerProtocol.V1 -> obj("file/content", directory, mapOf("path" to path)).toFileContent()
     ServerProtocol.V2 -> {
-      val (bytes, contentType) = requestBytes("GET", "api/fs/read/${path.trimStart('/')}", query = locationQuery(directory))
+      val (bytes, contentType) = requestBytes("GET", "api/fs/read/${encodedPath(path)}", query = locationQuery(directory))
       val binary = !isTextFile(path, contentType)
       if (binary) FileContent("binary", Base64.encodeToString(bytes, Base64.NO_WRAP), "base64", contentType)
       else FileContent("text", bytes.toString(Charsets.UTF_8), mimeType = contentType)

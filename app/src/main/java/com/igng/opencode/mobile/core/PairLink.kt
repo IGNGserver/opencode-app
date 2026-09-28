@@ -31,6 +31,11 @@ object PairLinkResolver {
 
   suspend fun resolve(value: String): PairResolution = withContext(Dispatchers.IO) {
     val input = requireNotNull(value.trim().toHttpUrlOrNull()) { "配对链接无效" }
+    // The one-time pairing token is a bearer credential; never send it over cleartext unless the
+    // target is the local loopback (tests/dev). This mirrors the gate in PushRegistration.register.
+    require(input.scheme == "https" || input.host in setOf("localhost", "127.0.0.1", "::1")) {
+      "配对链接必须使用 HTTPS"
+    }
     val direct = input.queryParameter("auth_token")
     if (!direct.isNullOrBlank()) return@withContext PairResolution(rootUrl(input), decodeToken(direct))
 
@@ -41,6 +46,9 @@ object PairLinkResolver {
     response.use {
       if (!it.isSuccessful && it.code !in 300..399) throw IOException("配对链接返回 HTTP ${it.code}")
       val finalUrl = it.request.url
+      require(finalUrl.scheme == "https" || finalUrl.host in setOf("localhost", "127.0.0.1", "::1")) {
+        "配对链接重定向到了非 HTTPS 地址"
+      }
       val token = finalUrl.queryParameter("auth_token")
       if (!token.isNullOrBlank()) return@withContext PairResolution(rootUrl(finalUrl), decodeToken(token))
       val cookie = jar.header(finalUrl)

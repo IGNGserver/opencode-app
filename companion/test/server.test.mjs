@@ -2,7 +2,19 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createCompanion, mapEvent } from '../src/server.mjs'
+
+test('mapEvent matches the shared task-event contract', () => {
+  const contract = JSON.parse(readFileSync(fileURLToPath(new URL('../../docs/task-event-contract.json', import.meta.url)), 'utf8'))
+  for (const testCase of contract.cases) {
+    const previous = testCase.previous ? { phase: testCase.previous } : null
+    const next = mapEvent(testCase.companion, previous)
+    const phase = next?.phase ?? previous?.phase ?? 'IDLE'
+    assert.equal(phase, testCase.expectedPhase, testCase.name)
+  }
+})
 
 test('task events become push phases without message content', () => {
   assert.deepEqual(mapEvent({ type: 'permission.asked' }), { phase: 'WAITING_PERMISSION', detail: '等待权限确认' })

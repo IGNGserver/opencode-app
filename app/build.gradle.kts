@@ -24,6 +24,8 @@ android {
   kotlin { jvmToolchain(17) }
   testOptions { unitTests.isReturnDefaultValues = true }
 }
+// Unit tests read the shared cross-language contract from the repository root.
+tasks.withType<Test>().configureEach { workingDir = rootDir }
 dependencies {
   implementation("androidx.core:core-ktx:1.17.0")
   implementation("androidx.activity:activity-compose:1.10.1")
