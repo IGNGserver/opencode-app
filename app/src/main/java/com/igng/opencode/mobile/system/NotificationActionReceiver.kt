@@ -21,16 +21,16 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val sessionId = intent.getStringExtra("sessionId") ?: return@launch
         val directory = intent.getStringExtra("directory") ?: return@launch
         val profile = store.profiles().firstOrNull { it.id == serverId } ?: return@launch
-        val client = OpenCodeApi(profile, store.password(serverId))
+        val client = OpenCodeApi(profile, store.credentials(serverId))
         when (intent.action) {
           "abort" -> client.abort(Session(sessionId, directory, "", 0))
-          "reject", "once" -> {
+          "reject", "once", "always" -> {
             val permissionId = intent.getStringExtra("permissionId") ?: return@launch
             val permissionDirectory = intent.getStringExtra("permissionDirectory") ?: directory
             client.replyPermission(PermissionRequest(permissionId, sessionId, permissionDirectory, "", ""), intent.action!!)
           }
         }
-        TaskNotifications(context).cancel(sessionId)
+        TaskNotifications(context).cancel(serverId, sessionId)
       } catch (_: Exception) { /* UI and SSE show the request again if server rejected action. */ }
       finally { pending.finish() }
     }

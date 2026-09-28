@@ -22,6 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.igng.opencode.mobile.core.*
 
 private enum class DetailTab(val label: String) { CHAT("对话"), TODO("待办"), CHANGES("改动"), FILES("文件"), CHILDREN("子任务") }
@@ -56,16 +58,20 @@ fun ChatScreen(state: MobileState, controller: MobileController, onSessions: () 
       }
       state.tasks[session.id]?.let { StatePill(it.phase) }
       Box {
-        TextButton(shape = RoundedCornerShape(6.dp), onClick = { menu = true }) { Text("⋯") }
+        TextButton(shape = RoundedCornerShape(6.dp), onClick = { menu = true }, modifier = Modifier.semantics {
+          contentDescription = "更多会话操作"
+        }) { Text("⋯") }
         DropdownMenu(menu, { menu = false }) {
-          DropdownMenuItem(text = { Text("重命名") }, onClick = { menu = false; title = session.title; rename = true })
-          DropdownMenuItem(text = { Text("Fork 会话") }, onClick = { menu = false; controller.fork() })
-          DropdownMenuItem(text = { Text("分享链接") }, onClick = { menu = false; controller.share() })
-          DropdownMenuItem(text = { Text("取消分享") }, onClick = { menu = false; controller.unshare() })
+          if (state.protocol == ServerProtocol.V1) {
+            DropdownMenuItem(text = { Text("重命名") }, onClick = { menu = false; title = session.title; rename = true })
+            DropdownMenuItem(text = { Text("Fork 会话") }, onClick = { menu = false; controller.fork() })
+            DropdownMenuItem(text = { Text("分享链接") }, onClick = { menu = false; controller.share() })
+            DropdownMenuItem(text = { Text("取消分享") }, onClick = { menu = false; controller.unshare() })
+          }
           DropdownMenuItem(text = { Text("总结会话") }, onClick = { menu = false; controller.summarize() })
           DropdownMenuItem(text = { Text("撤销最后一条消息") }, onClick = { menu = false; state.messages.lastOrNull()?.let { controller.revert(it.id) } })
           DropdownMenuItem(text = { Text("恢复撤销") }, onClick = { menu = false; controller.unrevert() })
-          DropdownMenuItem(text = { Text("删除会话", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; delete = true })
+          if (state.protocol == ServerProtocol.V1) DropdownMenuItem(text = { Text("删除会话", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; delete = true })
         }
       }
     }
@@ -79,8 +85,8 @@ fun ChatScreen(state: MobileState, controller: MobileController, onSessions: () 
     HorizontalDivider()
     when (tab) {
       DetailTab.CHAT -> Conversation(state, controller, Modifier.weight(1f))
-      DetailTab.TODO -> TodoPanel(state.todos, Modifier.weight(1f))
-      DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.weight(1f))
+      DetailTab.TODO -> TodoPanel(state.todos, state.protocol, Modifier.weight(1f))
+      DetailTab.CHANGES -> ChangesPanel(state.changes, state.protocol, Modifier.weight(1f))
       DetailTab.FILES -> FilesPanel(state, controller, Modifier.weight(1f))
       DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.weight(1f))
     }
@@ -110,7 +116,8 @@ private fun Conversation(state: MobileState, controller: MobileController, modif
   val permissions = state.permissions.filter { it.sessionId == state.sessionId }
   val questions = state.questions.filter { it.sessionId == state.sessionId }
   val total = state.messages.size + permissions.size + questions.size
-  LaunchedEffect(state.sessionId, total) { if (total > 0) list.animateScrollToItem(total - 1) }
+  val contentVersion = remember(state.messages) { state.messages.hashCode() }
+  LaunchedEffect(state.sessionId, total, contentVersion) { if (total > 0) list.animateScrollToItem(total - 1) }
   LazyColumn(modifier.fillMaxWidth(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
     if (state.messages.isEmpty() && permissions.isEmpty() && questions.isEmpty()) item {
       FluentCard {
@@ -149,9 +156,9 @@ private fun MessagePartView(part: MessagePart) {
     "tool" -> ExpandablePart(part.title.ifBlank { part.tool.ifBlank { "工具调用" } } + " · " + part.status,
       listOf(part.input.takeIf { it.isNotBlank() }?.let { "输入\n$it" }, part.output.takeIf { it.isNotBlank() }?.let { "输出\n$it" }).filterNotNull().joinToString("\n\n"), false)
     "file" -> InfoPart("文件", part.path.ifBlank { part.text })
-    "patch", "diff" -> ExpandablePart("代码改动", part.text.ifBlank { part.output }, false)
-    "agent", "subtask", "task" -> InfoPart("子任务", part.text.ifBlank { part.title })
-    "error" -> Text(part.text.ifBlank { part.output }, color = MaterialTheme.colorScheme.error)
+    "patch", "diff" -> ExpandablePart("代码改动", part.patch.ifBlank { part.text }.ifBlank { part.output }.ifBlank { part.files.joinToString("\n") }, false)
+    "agent", "subtask", "task" -> InfoPart("子任务", part.text.ifBlank { part.title }.ifBlank { part.path })
+    "error" -> Text(part.error.ifBlank { part.text }.ifBlank { part.output }, color = MaterialTheme.colorScheme.error)
     "step-start", "step-finish", "snapshot", "compaction" -> Unit
     else -> InfoPart(part.type.ifBlank { "内容" }, part.text.ifBlank { part.title })
   }
@@ -211,10 +218,12 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
     Text(request.detail, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium,
       modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp)).padding(10.dp))
     Spacer(Modifier.height(10.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+      Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
       OutlinedButton(shape = RoundedCornerShape(6.dp), onClick = { controller.replyPermission(request, "reject") }) { Text("拒绝") }
       Button(shape = RoundedCornerShape(6.dp), onClick = { controller.replyPermission(request, "once") }) { Text("允许一次") }
       TextButton(shape = RoundedCornerShape(6.dp), onClick = { confirmAlways = true }) { Text("始终允许") }
+      }
     }
   }
   if (confirmAlways) AlertDialog(onDismissRequest = { confirmAlways = false }, title = { Text("始终允许此操作？") },
@@ -248,8 +257,10 @@ fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
           }
         }
       }
-      TextField(custom[index], { value -> custom = custom.toMutableList().also { it[index] = value } },
-        label = { Text("自定义回答") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+      if (question.custom) {
+        TextField(custom[index], { value -> custom = custom.toMutableList().also { it[index] = value } },
+          label = { Text("自定义回答") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+      }
     }
     Spacer(Modifier.height(10.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -259,7 +270,7 @@ fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
           val value = custom[index].trim()
           if (value.isBlank()) list else if (request.questions[index].multiple) list + value else listOf(value)
         })
-      }, enabled = answers.indices.all { answers[it].isNotEmpty() || custom[it].isNotBlank() }) { Text("提交回答") }
+      }, enabled = answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) }) { Text("提交回答") }
     }
   }
 }
@@ -271,9 +282,13 @@ private fun Composer(state: MobileState, controller: MobileController) {
   var modelMenu by remember { mutableStateOf(false) }
   var files by remember { mutableStateOf(false) }
   var fileQuery by remember { mutableStateOf("") }
-  val running = state.tasks[state.sessionId]?.phase in setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING)
+  val task = state.tasks[state.sessionId]
+  val waiting = task?.phase in setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
+  val running = task?.phase in setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING)
   Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp, vertical = 8.dp)) {
     if (!state.connected) Text("离线缓存 · 重新连接后可发送任务", color = Fluent.amber,
+      style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 6.dp))
+    if (waiting) Text("请先处理当前会话的待处理事项", color = Fluent.amber,
       style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 6.dp))
     if (draft.startsWith('/')) {
       val command = draft.substringAfter('/').substringBefore(' ')
@@ -305,7 +320,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
           }
           if (running) FilledTonalButton(shape = RoundedCornerShape(6.dp), onClick = controller::abort) { Text("停止") }
           else Button(shape = RoundedCornerShape(6.dp), onClick = { val text = draft.trim(); controller.send(text) { draft = "" } },
-            enabled = state.connected && draft.isNotBlank()) { Text("发送 ↑") }
+            enabled = state.connected && !state.cached && !waiting && !running && draft.isNotBlank()) { Text("发送 ↑") }
         }
       }
     }
@@ -319,9 +334,9 @@ private fun Composer(state: MobileState, controller: MobileController) {
 }
 
 @Composable
-private fun TodoPanel(todos: List<TodoItem>, modifier: Modifier = Modifier) {
+private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    if (todos.isEmpty()) item { Text("当前会话没有待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    if (todos.isEmpty()) item { Text(if (protocol == ServerProtocol.V2) "当前 OpenCode V2 接口未提供待办数据。" else "当前会话没有待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
     items(todos) { todo -> FluentCard {
       Row(verticalAlignment = Alignment.CenterVertically) {
         Text(if (todo.status == "completed") "✓" else "○", color = if (todo.status == "completed") Fluent.green else Fluent.blue)
@@ -334,9 +349,9 @@ private fun TodoPanel(todos: List<TodoItem>, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ChangesPanel(changes: List<FileChange>, modifier: Modifier = Modifier) {
+private fun ChangesPanel(changes: List<FileChange>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    if (changes.isEmpty()) item { Text("目前没有改动。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    if (changes.isEmpty()) item { Text(if (protocol == ServerProtocol.V2) "当前 OpenCode V2 接口未提供会话改动数据。" else "目前没有改动。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
     items(changes) { change ->
       var open by remember(change.path) { mutableStateOf(false) }
       FluentCard(onClick = { open = !open }) {
@@ -348,8 +363,8 @@ private fun ChangesPanel(changes: List<FileChange>, modifier: Modifier = Modifie
         }
         if (open) {
           Spacer(Modifier.height(10.dp))
-          Text("修改后", style = MaterialTheme.typography.labelMedium)
-          Text(change.after.ifBlank { "无内容" }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+          Text("改动", style = MaterialTheme.typography.labelMedium)
+          Text(change.patch.ifBlank { change.after }.ifBlank { "无内容" }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
         }
       }
     }
@@ -367,7 +382,10 @@ private fun FilesPanel(state: MobileState, controller: MobileController, modifie
       Text(state.filePath, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
     HorizontalDivider()
-    if (state.fileText != null) {
+    if (state.fileBinary) {
+      Text("这是二进制文件，当前仅支持查看文件列表。", color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(vertical = 16.dp))
+    } else if (state.fileText != null) {
       TextButton(shape = RoundedCornerShape(6.dp), onClick = { clipboard.setText(AnnotatedString(state.fileText)) }) { Text("复制内容") }
       Text(state.fileText, modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace,
         style = MaterialTheme.typography.bodyMedium)
