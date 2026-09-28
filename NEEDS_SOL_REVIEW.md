@@ -35,6 +35,12 @@
 - 真实 OpenCode Server 的 V1/V2 契约、真实 Android 设备 UI 与低内存回收、FCM 实际投递、Android 16 Live Updates 提升、HyperOS 超级岛、历史 APK 覆盖安装。
 - 本轮已做静态与 JVM/MockWebServer 层面的验证；上述真机/真服务端验收需在目标环境完成，不能用本机结果宣称已通过。
 
+## 6. 其他低优先级加固（未做，属可选项）
+
+- GitHub Actions 目前用主版本 tag（`actions/checkout@v4` 等）。审计建议固定到 commit SHA；改动涉及核对每个 action 的 SHA，建议在独立 PR 中统一处理，避免与本轮功能修复混在一起。
+- Android 依赖尚未启用 Gradle 依赖验证元数据（`dependencyVerification`）。启用需要为全部依赖生成/维护校验清单，属于独立的供应链改动。
+- UI 仍然一次性加载整个会话历史做展示（`loadSession`）；网络层已限制单响应与分页总量。大历史的分页/懒加载属于界面层改动，建议在补了 Compose 仪器测试后再做。
+
 ## 已完成验证（本轮）
 
 - `ANDROID_HOME=/home/lvziw/Android/Sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug`：通过（21 项单元测试）。
