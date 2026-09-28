@@ -178,9 +178,13 @@ fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (St
     }
   }
   if (create) AlertDialog(onDismissRequest = { create = false }, title = { Text("新建会话") }, text = {
-    TextField(newTitle, { newTitle = it }, label = { Text("会话标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+    if (state.protocol == ServerProtocol.V2) {
+      Text("OpenCode V2 不提供创建时设置标题的接口；发送第一条任务后，服务器会生成会话标题。")
+    } else {
+      TextField(newTitle, { newTitle = it }, label = { Text("会话标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+    }
   }, confirmButton = { TextButton(shape = RoundedCornerShape(6.dp), onClick = {
-    controller.createSession(newTitle.ifBlank { "新任务" }); newTitle = ""; create = false
+    controller.createSession(if (state.protocol == ServerProtocol.V2) "" else newTitle.ifBlank { "新任务" }); newTitle = ""; create = false
   }, enabled = state.connected && state.project != null) { Text("创建") } }, dismissButton = { TextButton(shape = RoundedCornerShape(6.dp), onClick = { create = false }) { Text("取消") } })
 }
 
@@ -194,8 +198,18 @@ fun ServersScreen(state: MobileState, controller: MobileController, onConnected:
     ServerForm(editing, onCancel = { showForm = false; editing = null }, onSave = { profile, password, done ->
       scope.launch {
         try {
-          val version = controller.testServer(profile, password ?: controller.password(profile.id))
-          controller.saveServer(profile, password)
+          val pair = PairLinkResolver.isPairLink(profile.url)
+          val resolved = if (pair) PairLinkResolver.resolve(profile.url) else null
+          val actualProfile = if (resolved == null) profile else profile.copy(url = resolved.serverUrl, username = resolved.credentials.username)
+          val savedCredentials = controller.credentials(profile.id)
+          val credentials = resolved?.credentials ?: ServerCredentials(
+            username = actualProfile.username,
+            password = password ?: savedCredentials.password,
+            cookie = savedCredentials.cookie
+          )
+          val version = controller.testServer(actualProfile, credentials)
+          if (resolved == null) controller.saveServer(actualProfile, password, credentialUsername = actualProfile.username)
+          else controller.saveServer(actualProfile, resolved.credentials.password, resolved.credentials.cookie, resolved.credentials.username)
           done("已连接 OpenCode $version")
           showForm = false; editing = null; onConnected()
         } catch (error: Exception) { done(error.message ?: "连接失败") }
@@ -244,12 +258,13 @@ private fun ServerForm(existing: ServerProfile?, onCancel: () -> Unit, onSave: (
   var companion by remember(existing?.id) { mutableStateOf(existing?.companionUrl ?: "") }
   var autoConnect by remember(existing?.id) { mutableStateOf(existing?.autoConnect ?: true) }
   var notifications by remember(existing?.id) { mutableStateOf(existing?.notifications ?: true) }
-  var allowHttp by remember(existing?.id) { mutableStateOf(existing?.url?.startsWith("http://") == true) }
+  var allowHttp by remember(existing?.id) { mutableStateOf(existing?.allowCleartext == true) }
   var result by remember { mutableStateOf("") }
   var working by remember { mutableStateOf(false) }
+  val normalizedInput = url.trim()
   LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
     item { PageHeader("NEW CONNECTION", if (existing == null) "添加服务器" else "编辑服务器", "取消", onCancel) }
-    item { Text("直接连接 OpenCode Server。首次连接需要服务器监听可访问的地址，并配置 HTTP Basic Auth。",
+    item { Text("可直接填写 OpenCode Server 地址，也可粘贴官方 opencode pair 链接。配对链接会被一次性解析并把凭据安全保存在 Android Keystore 中。",
       style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     item { TextField(name, { name = it }, label = { Text("名称") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
     item { TextField(url, { url = it }, label = { Text("服务器地址") }, placeholder = { Text("https://dev.example.com") },
@@ -261,7 +276,7 @@ private fun ServerForm(existing: ServerProfile?, onCancel: () -> Unit, onSave: (
       keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth(), singleLine = true) }
     item { SwitchRow("自动连接", autoConnect, { autoConnect = it }) }
     item { SwitchRow("任务通知", notifications, { notifications = it }) }
-    if (url.startsWith("http://", true)) item {
+    if (normalizedInput.startsWith("http://", true)) item {
       SwitchRow("允许明文 HTTP 连接", allowHttp, { allowHttp = it })
       Text("HTTP 会暴露会话和 Basic Auth 凭据。请仅在受信任的网络使用。", color = Fluent.amber, style = MaterialTheme.typography.labelMedium)
     }
@@ -269,10 +284,13 @@ private fun ServerForm(existing: ServerProfile?, onCancel: () -> Unit, onSave: (
     item {
       Button(shape = RoundedCornerShape(6.dp), onClick = {
         working = true
-        val profile = ServerProfile(id, name.trim(), url.trim().trimEnd('/'), username.trim().ifBlank { "opencode" }, autoConnect, notifications, companion.trim().trimEnd('/'))
+        val normalizedUrl = normalizedInput.trimEnd('/')
+        val profile = ServerProfile(id, name.trim(), normalizedUrl, username.trim().ifBlank { "opencode" }, autoConnect, notifications,
+          companion.trim().trimEnd('/'), allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp)
         onSave(profile, password.takeIf { it.isNotBlank() || existing == null }) { message -> result = message; working = false }
-      }, enabled = !working && name.isNotBlank() && (existing != null || password.isNotBlank()) &&
-        (url.startsWith("https://") || url.startsWith("http://") && allowHttp),
+      }, enabled = !working && name.isNotBlank() &&
+        (PairLinkResolver.isPairLink(normalizedInput) || existing != null || password.isNotBlank()) &&
+        ((normalizedInput.startsWith("https://", true) || normalizedInput.startsWith("http://", true) && allowHttp)),
         modifier = Modifier.fillMaxWidth()) { Text(if (working) "正在测试连接…" else "测试并保存") }
     }
   }

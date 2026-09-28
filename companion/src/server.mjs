@@ -15,7 +15,7 @@ export function mapEvent(event, previous) {
   if (type === 'session.error') return { phase: 'FAILED', detail: '执行失败' }
   if (type === 'permission.asked') return { phase: 'WAITING_PERMISSION', detail: '等待权限确认' }
   if (type === 'question.asked') return { phase: 'WAITING_QUESTION', detail: '等待你的回答' }
-  if (type === 'permission.replied' || type === 'question.replied') return { phase: 'THINKING', detail: '继续执行' }
+  if (type === 'permission.replied' || type === 'permission.rejected' || type === 'question.replied' || type === 'question.rejected') return { phase: 'THINKING', detail: '继续执行' }
   if (type === 'message.part.updated' && partType === 'reasoning') return { phase: 'THINKING', detail: '正在思考' }
   if (type === 'message.part.updated' && partType === 'tool') return { phase: /test|gradle|pytest|vitest|jest/i.test(tool ?? '') ? 'TESTING' : tool === 'task' ? 'SUBAGENT' : 'TOOL', detail: `正在运行 ${String(tool || '工具').slice(0, 40)}` }
   return null
@@ -27,14 +27,14 @@ export function safeEqual(left, right) {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession }) {
+export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession, serverKey = "" }) {
   const devices = new Map()
   const states = new Map()
   let persist = Promise.resolve()
   async function load() {
     try {
       const data = JSON.parse(await readFile(registryFile, 'utf8'))
-      for (const item of data.devices ?? []) devices.set(`${item.serverId}:${item.deviceId}`, item)
+      for (const item of data.devices ?? []) devices.set(`${item.serverKey || item.serverId}:${item.deviceId}`, item)
     } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   function save() {
@@ -64,21 +64,30 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
       const path = new URL(req.url, 'http://localhost').pathname
       if (req.method === 'GET' && path === '/health') return reply(res, 200, { healthy: true })
       if (req.method === 'POST' && path === '/v1/devices') {
-        if (!await verifyDevice(req.headers.authorization)) return reply(res, 401, { error: 'unauthorized' })
+        if (!await verifyDevice(req.headers.authorization, req.headers.cookie)) return reply(res, 401, { error: 'unauthorized' })
         const input = await body(req)
-        if (![input.deviceId, input.serverId, input.token].every(x => typeof x === 'string' && x.length > 0 && x.length < 1024)) return reply(res, 400, { error: 'invalid device' })
-        devices.set(`${input.serverId}:${input.deviceId}`, { deviceId: input.deviceId, serverId: input.serverId, token: input.token, updated: Date.now() })
+        if (![input.deviceId, input.serverKey, input.token].every(x => typeof x === 'string' && x.length > 0 && x.length < 1024)) return reply(res, 400, { error: 'invalid device' })
+        if (serverKey && input.serverKey !== serverKey) return reply(res, 403, { error: 'wrong server' })
+        devices.set(`${input.serverKey}:${input.deviceId}`, {
+          deviceId: input.deviceId,
+          serverKey: input.serverKey,
+          profileId: typeof input.profileId === 'string' && input.profileId.length > 0 ? input.profileId : input.serverId,
+          token: input.token,
+          updated: Date.now(),
+        })
         await save()
         return reply(res, 200, { registered: true })
       }
       if (req.method === 'POST' && path === '/v1/events') {
         if (!safeEqual(req.headers['x-opencode-mobile-secret'], pluginSecret)) return reply(res, 401, { error: 'unauthorized' })
         const event = await body(req)
-        if (typeof event.sessionId !== 'string' || event.sessionId.length > 256 || !event.sessionId || typeof event.type !== 'string') return reply(res, 400, { error: 'invalid event' })
-        const before = states.get(event.sessionId)
+        if (typeof event.sessionId !== 'string' || event.sessionId.length > 256 || !event.sessionId || typeof event.type !== 'string' || typeof event.serverKey !== 'string' || !event.serverKey) return reply(res, 400, { error: 'invalid event' })
+        if (serverKey && event.serverKey !== serverKey) return reply(res, 403, { error: 'wrong server' })
+        const stateKey = `${event.serverKey}:${event.sessionId}`
+        const before = states.get(stateKey)
         const next = mapEvent(event, before)
         if (next && (next.phase !== before?.phase || next.detail !== before?.detail)) {
-          states.set(event.sessionId, next)
+          states.set(stateKey, next)
           const session = await fetchSession(event.sessionId, event.directory).catch(() => ({}))
           const payload = {
             sessionId: event.sessionId,
@@ -87,8 +96,8 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
             phase: next.phase,
             detail: next.detail,
           }
-          await Promise.allSettled([...devices.values()].map(async device => {
-            await send(device.token, { ...payload, serverId: device.serverId })
+          await Promise.allSettled([...devices.values()].filter(device => device.serverKey === event.serverKey).map(async device => {
+            await send(device.token, { ...payload, serverId: device.profileId || device.serverId })
           }))
         }
         return reply(res, 200, { accepted: true })
@@ -110,24 +119,42 @@ export async function start() {
   const credentials = 'Basic ' + Buffer.from(`${opencodeUsername}:${opencodePassword}`).toString('base64')
   const url = new URL(opencodeUrl)
   if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) throw new Error('OPENCODE_URL must target local OpenCode server')
-  const unauthenticated = await fetch(new URL('/global/health', opencodeUrl))
+  const rawServerKey = process.env.OPENCODE_MOBILE_SERVER_KEY?.trim()
+  if (!rawServerKey) throw new Error('OPENCODE_MOBILE_SERVER_KEY is required and must equal the App server URL')
+  const configuredServerKey = rawServerKey.replace(/\/+$/, '')
+  const protectedProbe = async headers => {
+    const legacy = await fetch(new URL('/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000) })
+    if (legacy.status !== 404) return legacy
+    return fetch(new URL('/api/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000) })
+  }
+  const unauthenticated = await protectedProbe({})
   if (unauthenticated.ok) throw new Error('OpenCode Basic Auth must be enabled')
+  if (![401, 403].includes(unauthenticated.status)) throw new Error(`Unable to verify OpenCode Basic Auth: HTTP ${unauthenticated.status}`)
   const { initializeApp, applicationDefault } = await import('firebase-admin/app')
   const { getMessaging } = await import('firebase-admin/messaging')
   initializeApp({ credential: applicationDefault(), projectId: process.env.FIREBASE_PROJECT_ID })
   const registryFile = process.env.REGISTRY_FILE || join(homedir(), '.local/state/opencode-mobile/devices.json')
   const companion = createCompanion({
-    opencodeUrl, pluginSecret, registryFile,
-    verifyDevice: async auth => {
-      if (typeof auth !== 'string' || !auth.startsWith('Basic ')) return false
-      const result = await fetch(new URL('/global/health', opencodeUrl), { headers: { authorization: auth }, signal: AbortSignal.timeout(3000) })
+    opencodeUrl, pluginSecret, registryFile, serverKey: configuredServerKey,
+    verifyDevice: async (auth, cookie) => {
+      if (typeof auth !== 'string' && typeof cookie !== 'string') return false
+      const headers = {}
+      if (typeof auth === 'string' && auth.startsWith('Basic ')) headers.authorization = auth
+      if (typeof cookie === 'string' && cookie) headers.cookie = cookie
+      if (!headers.authorization && !headers.cookie) return false
+      const result = await protectedProbe(headers)
       return result.ok
     },
     fetchSession: async (id, directory) => {
-      const endpoint = new URL(`/session/${encodeURIComponent(id)}`, opencodeUrl)
-      if (directory) endpoint.searchParams.set('directory', directory)
-      const response = await fetch(endpoint, { headers: { authorization: credentials }, signal: AbortSignal.timeout(3000) })
-      return response.ok ? response.json() : {}
+      const headers = { authorization: credentials }
+      const legacyEndpoint = new URL(`/session/${encodeURIComponent(id)}`, opencodeUrl)
+      if (directory) legacyEndpoint.searchParams.set('directory', directory)
+      const legacy = await fetch(legacyEndpoint, { headers, signal: AbortSignal.timeout(3000) })
+      if (legacy.ok) return legacy.json()
+      const current = await fetch(new URL(`/api/session/${encodeURIComponent(id)}`, opencodeUrl), { headers, signal: AbortSignal.timeout(3000) })
+      if (!current.ok) return {}
+      const result = await current.json()
+      return result.data ?? result
     },
     send: (token, data) => getMessaging().send({ token, data, android: { priority: data.phase.startsWith('WAITING') || data.phase === 'FAILED' ? 'high' : 'normal' } }),
   })

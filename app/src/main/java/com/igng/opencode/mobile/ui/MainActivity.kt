@@ -50,7 +50,7 @@ class MainActivity : ComponentActivity() {
       }
       LaunchedEffect(state.serverId) {
         val profile = state.server ?: return@LaunchedEffect
-        PushRegistration(this@MainActivity).enableFor(profile, controller.password(profile.id), controller.deviceId())
+        PushRegistration(this@MainActivity).enableFor(profile, controller.credentials(profile.id), controller.deviceId())
       }
       LaunchedEffect(deepLink, state.sessions) {
         val (serverId, sessionId) = deepLink ?: return@LaunchedEffect

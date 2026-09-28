@@ -22,15 +22,20 @@ test('registration authenticates and event delivery only targets registered devi
     const denied = await fetch(url + '/v1/devices', { method: 'POST', body: '{}' })
     assert.equal(denied.status, 401)
     const registered = await fetch(url + '/v1/devices', { method: 'POST', headers: { authorization: 'Basic valid' },
-      body: JSON.stringify({ deviceId: 'device', serverId: 'server', token: 'token' }) })
+      body: JSON.stringify({ deviceId: 'device', serverId: 'server', profileId: 'profile-a', serverKey: 'server-a', token: 'token' }) })
     assert.equal(registered.status, 200)
+    const other = await fetch(url + '/v1/devices', { method: 'POST', headers: { authorization: 'Basic valid' },
+      body: JSON.stringify({ deviceId: 'other', serverId: 'server', profileId: 'profile-b', serverKey: 'server-b', token: 'other-token' }) })
+    assert.equal(other.status, 200)
     const ignored = await fetch(url + '/v1/events', { method: 'POST', headers: { 'x-opencode-mobile-secret': 'wrong' },
       body: JSON.stringify({ sessionId: 'session', type: 'session.idle' }) })
     assert.equal(ignored.status, 401)
-    const payload = { sessionId: 'session', type: 'permission.asked', directory: '/project' }
+    const payload = { sessionId: 'session', serverKey: 'server-a', type: 'permission.asked', directory: '/project' }
     const event = await fetch(url + '/v1/events', { method: 'POST', headers: { 'x-opencode-mobile-secret': 'secret' }, body: JSON.stringify(payload) })
     assert.equal(event.status, 200)
     assert.equal(sent.length, 1)
+    assert.equal(sent[0].token, 'token')
+    assert.equal(sent[0].data.serverId, 'profile-a')
     assert.equal(sent[0].data.phase, 'WAITING_PERMISSION')
     assert.equal(sent[0].data.title, 'Build task')
   } finally { server.close() }
@@ -40,9 +45,11 @@ test('registration authenticates and event delivery only targets registered devi
 test('plugin forwards metadata only', async () => {
   const oldUrl = process.env.OPENCODE_MOBILE_COMPANION_URL
   const oldSecret = process.env.OPENCODE_MOBILE_PLUGIN_SECRET
+  const oldServerKey = process.env.OPENCODE_MOBILE_SERVER_KEY
   const oldFetch = globalThis.fetch
   process.env.OPENCODE_MOBILE_COMPANION_URL = 'http://127.0.0.1:4344'
   process.env.OPENCODE_MOBILE_PLUGIN_SECRET = 'fixture-secret'
+  process.env.OPENCODE_MOBILE_SERVER_KEY = 'server-a'
   const sent = []
   globalThis.fetch = async (_url, options) => { sent.push(JSON.parse(options.body)); return { ok: true } }
   try {
@@ -60,5 +67,7 @@ test('plugin forwards metadata only', async () => {
     else process.env.OPENCODE_MOBILE_COMPANION_URL = oldUrl
     if (oldSecret === undefined) delete process.env.OPENCODE_MOBILE_PLUGIN_SECRET
     else process.env.OPENCODE_MOBILE_PLUGIN_SECRET = oldSecret
+    if (oldServerKey === undefined) delete process.env.OPENCODE_MOBILE_SERVER_KEY
+    else process.env.OPENCODE_MOBILE_SERVER_KEY = oldServerKey
   }
 })

@@ -55,7 +55,8 @@ class OfflineCache(context: Context) {
         .put("parts", JSONArray().apply { message.parts.forEach { part ->
           put(JSONObject().put("id", part.id).put("type", part.type).put("text", part.text.take(20_000))
             .put("tool", part.tool).put("title", part.title).put("status", part.status).put("input", part.input.take(4_000))
-            .put("output", part.output.take(4_000)).put("path", part.path))
+            .put("output", part.output.take(4_000)).put("path", part.path).put("error", part.error.take(4_000))
+            .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)).put("attachments", JSONArray(part.attachments)))
         } }))
     } }
     write("messages:$serverId:$sessionId", data.toString())
@@ -65,7 +66,9 @@ class OfflineCache(context: Context) {
     return try {
     JSONArray(raw).objects().map { item ->
       Message(item.str("id"), item.str("role"), item.optLong("created"), item.arr("parts").objects().map { part ->
-        MessagePart(part.str("id"), part.str("type"), part.str("text"), part.str("tool"), part.str("title"), part.str("status"), part.str("input"), part.str("output"), part.str("path"))
+        MessagePart(part.str("id"), part.str("type"), part.str("text"), part.str("tool"), part.str("title"), part.str("status"), part.str("input"), part.str("output"), part.str("path"), part.str("error"), part.str("patch"),
+          (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) },
+          (0 until part.arr("attachments").length()).mapNotNull { index -> part.arr("attachments").optString(index).takeIf(String::isNotBlank) })
       }, item.str("error").ifBlank { null })
     }
   } catch (_: Exception) { emptyList() }

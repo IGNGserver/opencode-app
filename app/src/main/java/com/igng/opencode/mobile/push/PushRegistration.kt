@@ -5,6 +5,7 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.igng.opencode.mobile.core.ServerCredentials
 import com.igng.opencode.mobile.core.ServerProfile
 import com.igng.opencode.mobile.core.ServerStore
 import com.igng.opencode.mobile.core.Session
@@ -14,6 +15,7 @@ import com.igng.opencode.mobile.system.TaskNotifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -21,27 +23,49 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.URI
+import java.util.concurrent.TimeUnit
 
 class PushRegistration(private val context: Context) {
+  private val client = OkHttpClient.Builder()
+    .connectTimeout(8, TimeUnit.SECONDS)
+    .readTimeout(12, TimeUnit.SECONDS)
+    .callTimeout(20, TimeUnit.SECONDS)
+    .build()
   fun available(): Boolean = FirebaseApp.getApps(context).isNotEmpty()
-  fun enableFor(profile: ServerProfile, password: String, deviceId: String) {
+  fun enableFor(profile: ServerProfile, password: String, deviceId: String) = enableFor(profile, ServerCredentials(profile.username, password), deviceId)
+  fun enableFor(profile: ServerProfile, credentials: ServerCredentials, deviceId: String) {
     if (!available() || profile.companionUrl.isBlank() || !profile.notifications) return
     FirebaseMessaging.getInstance().isAutoInitEnabled = true
     FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-      CoroutineScope(Dispatchers.IO).launch { runCatching { register(profile, password, token, deviceId) } }
+      CoroutineScope(Dispatchers.IO).launch {
+        try { register(profile, credentials, token, deviceId) } catch (_: Exception) { }
+      }
     }
   }
-  fun register(profile: ServerProfile, password: String, token: String, deviceId: String) {
-    if (profile.companionUrl.isBlank()) return
+  suspend fun register(profile: ServerProfile, password: String, token: String, deviceId: String) =
+    register(profile, ServerCredentials(profile.username, password), token, deviceId)
+  suspend fun register(profile: ServerProfile, credentials: ServerCredentials, token: String, deviceId: String) = withContext(Dispatchers.IO) {
+    if (profile.companionUrl.isBlank()) return@withContext
     val endpoint = URI(profile.companionUrl.trimEnd('/') + "/v1/devices")
     require(endpoint.scheme == "https" || endpoint.scheme == "http" && endpoint.host in setOf("localhost", "127.0.0.1")) {
       "推送伴随服务需要 HTTPS 地址"
     }
-    val body = JSONObject().put("deviceId", deviceId).put("serverId", profile.id).put("token", token).toString()
+    val serverKey = profile.url.trimEnd('/')
+    val body = JSONObject()
+      .put("deviceId", deviceId)
+      .put("serverId", profile.id)
+      .put("profileId", profile.id)
+      .put("serverKey", serverKey)
+      .put("token", token)
+      .toString()
       .toRequestBody("application/json".toMediaType())
-    val request = Request.Builder().url(endpoint.toString()).post(body)
-      .header("Authorization", Credentials.basic(profile.username.ifBlank { "opencode" }, password)).build()
-    OkHttpClient().newCall(request).execute().use { response ->
+    val requestBuilder = Request.Builder().url(endpoint.toString()).post(body)
+    if (credentials.password.isNotBlank()) {
+      requestBuilder.header("Authorization", Credentials.basic(credentials.username.ifBlank { profile.username.ifBlank { "opencode" } }, credentials.password))
+    }
+    if (credentials.cookie.isNotBlank()) requestBuilder.header("Cookie", credentials.cookie)
+    val request = requestBuilder.build()
+    client.newCall(request).execute().use { response ->
       if (!response.isSuccessful) error("推送设备注册失败：HTTP ${response.code}")
     }
   }
@@ -52,7 +76,9 @@ class MobileMessagingService : FirebaseMessagingService() {
     val store = ServerStore(this)
     CoroutineScope(Dispatchers.IO).launch {
       store.profiles().filter { it.notifications && it.companionUrl.isNotBlank() }.forEach { profile ->
-        runCatching { PushRegistration(this@MobileMessagingService).register(profile, store.password(profile.id), token, store.deviceId()) }
+        try {
+          PushRegistration(this@MobileMessagingService).register(profile, store.credentials(profile.id), token, store.deviceId())
+        } catch (_: Exception) { }
       }
     }
   }

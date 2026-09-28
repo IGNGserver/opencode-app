@@ -30,7 +30,7 @@ class TaskNotifications(private val context: Context) {
     const val RUNNING = "task_running"
     const val ATTENTION = "task_attention"
     const val COMPLETED = "task_completed"
-    fun notificationId(sessionId: String): Int = sessionId.hashCode() and 0x7fffffff
+    fun notificationId(serverId: String, sessionId: String): Int = "${serverId}:$sessionId".hashCode() and 0x7fffffff
   }
   init {
     manager.createNotificationChannel(NotificationChannel(RUNNING, "正在运行", NotificationManager.IMPORTANCE_DEFAULT))
@@ -41,7 +41,7 @@ class TaskNotifications(private val context: Context) {
   private fun open(serverId: String, sessionId: String): PendingIntent {
     val uri = Uri.parse("opencode-mobile://server/${Uri.encode(serverId)}/session/${Uri.encode(sessionId)}")
     val intent = Intent(Intent.ACTION_VIEW, uri, context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-    return PendingIntent.getActivity(context, notificationId(sessionId), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    return PendingIntent.getActivity(context, notificationId(serverId, sessionId), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
   }
   private fun action(name: String, profile: ServerProfile, session: Session, permission: PermissionRequest? = null): PendingIntent {
     val intent = Intent(context, NotificationActionReceiver::class.java).apply {
@@ -53,7 +53,7 @@ class TaskNotifications(private val context: Context) {
       permission?.let { putExtra("permissionId", it.id); putExtra("permissionDirectory", it.directory) }
       addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
     }
-    return PendingIntent.getBroadcast(context, notificationId(session.id) xor name.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    return PendingIntent.getBroadcast(context, notificationId(profile.id, session.id) xor name.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
   }
   fun build(profile: ServerProfile, session: Session, state: TaskState, permission: PermissionRequest? = null): Notification {
     val waiting = state.phase in setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
@@ -81,6 +81,10 @@ class TaskNotifications(private val context: Context) {
     if (state.phase == TaskPhase.WAITING_PERMISSION && permission != null) {
       builder.addAction(0, "拒绝", action("reject", profile, session, permission))
       builder.addAction(0, "允许一次", action("once", profile, session, permission))
+      builder.addAction(0, "始终允许", action("always", profile, session, permission))
+    }
+    if (state.phase == TaskPhase.WAITING_QUESTION) {
+      builder.addAction(0, "回答", open(profile.id, session.id))
     }
     val notification = builder.build()
     XiaomiIslandAdapter(context).extend(notification, title, state.detail, running)
@@ -89,9 +93,9 @@ class TaskNotifications(private val context: Context) {
   fun show(profile: ServerProfile, session: Session, state: TaskState, permission: PermissionRequest? = null) {
     if (!allowed()) return
     if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
-    manager.notify(notificationId(session.id), build(profile, session, state, permission))
+    manager.notify(notificationId(profile.id, session.id), build(profile, session, state, permission))
   }
-  fun cancel(sessionId: String) = manager.cancel(notificationId(sessionId))
+  fun cancel(serverId: String, sessionId: String) = manager.cancel(notificationId(serverId, sessionId))
 }
 
 internal class XiaomiIslandAdapter(private val context: Context) {

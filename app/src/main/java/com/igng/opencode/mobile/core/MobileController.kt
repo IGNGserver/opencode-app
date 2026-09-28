@@ -14,11 +14,13 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.util.UUID
 
 data class MobileState(
-  val profiles: List<ServerProfile> = emptyList(), val serverId: String? = null, val version: String = "",
+  val profiles: List<ServerProfile> = emptyList(), val serverId: String? = null, val version: String = "", val protocol: ServerProtocol = ServerProtocol.UNKNOWN,
   val connected: Boolean = false, val cached: Boolean = false, val loading: Boolean = false, val error: String? = null,
   val projects: List<Project> = emptyList(), val projectId: String? = null,
   val sessions: List<Session> = emptyList(), val sessionId: String? = null,
@@ -27,7 +29,7 @@ data class MobileState(
   val todos: List<TodoItem> = emptyList(), val children: List<Session> = emptyList(), val changes: List<FileChange> = emptyList(),
   val agents: List<AgentChoice> = emptyList(), val models: List<ModelChoice> = emptyList(), val commands: List<CommandChoice> = emptyList(),
   val agent: String? = null, val model: ModelChoice? = null,
-  val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null,
+  val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null, val fileBinary: Boolean = false,
   val searchResults: List<String> = emptyList()
 ) {
   val server: ServerProfile? get() = profiles.firstOrNull { it.id == serverId }
@@ -54,20 +56,37 @@ class MobileController private constructor(private val context: Context) {
   private var refresh: Job? = null
   private var eventRefresh: Job? = null
   private var messageRefresh: Job? = null
+  private var lastEventId = ""
+  private val sendMutex = Mutex()
 
   init { if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
   fun password(serverId: String): String = store.password(serverId)
+  fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
   fun deviceId(): String = store.deviceId()
-  suspend fun testServer(profile: ServerProfile, password: String): String = OpenCodeApi(profile, password).health()
+  suspend fun testServer(profile: ServerProfile, password: String): String = testServer(profile, ServerCredentials(profile.username, password))
+  suspend fun testServer(profile: ServerProfile, credentials: ServerCredentials): String {
+    val client = OpenCodeApi(profile, credentials)
+    val version = client.health()
+    client.projects()
+    return version
+  }
   fun clearError() = mutable.update { it.copy(error = null) }
 
-  fun saveServer(profile: ServerProfile, password: String?, connect: Boolean = true) {
-    store.save(profile, password)
+  fun saveServer(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null, connect: Boolean = true) {
+    store.save(profile, password, cookie, credentialUsername)
     mutable.update { it.copy(profiles = store.profiles()) }
     if (connect) connect(profile.id)
   }
   fun deleteServer(id: String) {
-    if (mutable.value.serverId == id) { stream?.cancel(); api = null }
+    if (mutable.value.serverId == id) {
+      stream?.cancel()
+      refresh?.cancel()
+      eventRefresh?.cancel()
+      messageRefresh?.cancel()
+      generation += 1
+      api = null
+      lastEventId = ""
+    }
     store.delete(id)
     cache.delete(id)
     mutable.update { MobileState(profiles = store.profiles(), serverId = store.profiles().firstOrNull()?.id) }
@@ -81,7 +100,8 @@ class MobileController private constructor(private val context: Context) {
     messageRefresh?.cancel()
     generation += 1
     val token = generation
-    api = OpenCodeApi(profile, store.password(id))
+    lastEventId = ""
+    api = OpenCodeApi(profile, store.credentials(id))
     val rememberedProject = if (store.selectedId() == id) store.selectedProject() else null
     val rememberedSession = if (store.selectedId() == id) store.selectedSession() else null
     store.select(id, rememberedProject, rememberedSession)
@@ -122,14 +142,14 @@ class MobileController private constructor(private val context: Context) {
       }.toMutableMap()
       permissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认") }
       questions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答") }
-      previous.copy(version = version, connected = true, cached = false, loading = false, error = null,
+      previous.copy(version = version, protocol = client.detectedProtocol(), connected = true, cached = false, loading = false, error = null,
         projects = projects, sessions = sessions, tasks = states, permissions = permissions, questions = questions,
         projectId = (previous.projectId ?: store.selectedProject())?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
         sessionId = (previous.sessionId ?: store.selectedSession())?.takeIf { id -> sessions.any { it.id == id } })
     }
     val current = mutable.value
-    current.project?.let { project -> loadChoices(project.directory) }
-    current.session?.let { loadSession(it) }
+    current.project?.let { project -> loadChoices(project.directory, token) }
+    current.session?.let { loadSession(it, token = token) }
   }
   fun reload() {
     val token = generation
@@ -141,12 +161,15 @@ class MobileController private constructor(private val context: Context) {
     stream = scope.launch {
       var retry = 1_000L
       while (isActive && token == generation) {
-        api?.events()?.catch { cause ->
-          mutable.update { it.copy(connected = false, error = "实时连接断开，正在重连：${cause.message}", tasks = it.tasks.mapValues { (_, task) ->
+          api?.events(lastEventId)?.catch { cause ->
+          if (token == generation) mutable.update { it.copy(connected = false, error = "实时连接断开，正在重连：${cause.message}", tasks = it.tasks.mapValues { (_, task) ->
             if (task.active) task.copy(phase = TaskPhase.DISCONNECTED, detail = "连接已断开") else task
           }) }
-        }?.collect { event ->
-          if (token == generation) handleEvent(event)
+          }?.collect { event ->
+            if (token == generation) {
+              if (event.id.isNotBlank()) lastEventId = event.id
+              handleEvent(event)
+            }
           retry = 1_000L
         }
         if (isActive && token == generation) {
@@ -160,6 +183,7 @@ class MobileController private constructor(private val context: Context) {
   private fun handleEvent(event: ServerEvent) {
     val props = event.properties
     val sessionId = props.str("sessionID").ifBlank { props.obj("part").str("sessionID") }.ifBlank { props.obj("info").str("sessionID") }
+    val directory = event.directory.ifBlank { mutable.value.sessions.firstOrNull { it.id == sessionId }?.directory.orEmpty() }
     if (sessionId.isNotBlank()) {
       val before = mutable.value.tasks[sessionId]
       val after = TaskReducer.event(sessionId, event.type, props, before)
@@ -176,19 +200,25 @@ class MobileController private constructor(private val context: Context) {
     }
     when (event.type) {
       "permission.asked" -> {
-        val request = props.toPermission(event.directory)
+        val request = props.toPermission(directory)
         mutable.update { it.copy(permissions = (it.permissions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
       "question.asked" -> {
-        val request = props.toQuestion(event.directory)
+        val request = props.toQuestion(directory)
         mutable.update { it.copy(questions = (it.questions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
-      "permission.replied", "permission.rejected" -> mutable.update { it.copy(permissions = it.permissions.filterNot { old -> old.id == props.str("requestID") }) }
-      "question.replied", "question.rejected" -> mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == props.str("requestID") }) }
+      "permission.replied", "permission.rejected" -> {
+        val requestId = props.str("requestID").ifBlank { props.str("id") }
+        mutable.update { it.copy(permissions = it.permissions.filterNot { old -> old.id == requestId }) }
+      }
+      "question.replied", "question.rejected" -> {
+        val requestId = props.str("requestID").ifBlank { props.str("id") }
+        mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == requestId }) }
+      }
     }
-    if (event.type in setOf("session.created", "session.updated", "session.deleted", "session.idle", "session.error", "permission.asked", "question.asked", "permission.replied", "question.replied")) {
+    if (event.type in setOf("session.created", "session.updated", "session.deleted", "session.idle", "session.error", "permission.asked", "question.asked", "permission.replied", "permission.rejected", "question.replied", "question.rejected")) {
       eventRefresh?.cancel()
       eventRefresh = scope.launch { delay(350); if (generation > 0) reload() }
     } else if (event.type in setOf("message.updated", "message.part.updated") && sessionId == mutable.value.sessionId) {
@@ -206,16 +236,19 @@ class MobileController private constructor(private val context: Context) {
   }
   fun selectProject(id: String) {
     val project = mutable.value.projects.firstOrNull { it.id == id } ?: return
-    mutable.update { it.copy(projectId = id, sessionId = null, messages = emptyList()) }
+    mutable.update { it.copy(projectId = id, sessionId = null, messages = emptyList(), agent = null, model = null) }
     store.rememberLocation(id, null)
-    scope.launch { loadChoices(project.directory) }
+    val token = generation
+    scope.launch { loadChoices(project.directory, token) }
   }
-  private suspend fun loadChoices(directory: String) {
+  private suspend fun loadChoices(directory: String, token: Int = generation) {
     val client = api ?: return
     val agents = runCatching { client.agents(directory) }.getOrDefault(emptyList())
     val models = runCatching { client.models(directory) }.getOrDefault(emptyList())
     val commands = runCatching { client.commands(directory) }.getOrDefault(emptyList())
-    if (mutable.value.project?.directory == directory) mutable.update { it.copy(agents = agents, models = models, commands = commands) }
+    if (token == generation && mutable.value.project?.directory == directory) {
+      mutable.update { it.copy(agents = agents, models = models, commands = commands) }
+    }
   }
   fun selectSession(id: String) {
     val session = mutable.value.sessions.firstOrNull { it.id == id } ?: return
@@ -224,25 +257,29 @@ class MobileController private constructor(private val context: Context) {
     val messages = if (offline) mutable.value.serverId?.let { cache.messages(it, id) }.orEmpty() else emptyList()
     mutable.update { it.copy(projectId = project?.id ?: it.projectId, sessionId = id, messages = messages,
       todos = emptyList(), children = emptyList(), changes = emptyList(), files = emptyList(),
-      searchResults = emptyList(), fileText = null) }
+      searchResults = emptyList(), fileText = null, fileBinary = false) }
     store.rememberLocation(project?.id, id)
-    if (!offline) scope.launch { loadChoices(session.directory); loadSession(session) }
+    if (!offline) {
+      val token = generation
+      scope.launch { loadChoices(session.directory, token); loadSession(session, token = token) }
+    }
   }
-  private suspend fun loadSession(session: Session, ancillary: Boolean = true) {
+  private suspend fun loadSession(session: Session, ancillary: Boolean = true, token: Int = generation) {
     val client = api ?: return
     val messages = runCatching { client.messages(session.id, session.directory) }.getOrElse { error ->
       val cached = mutable.value.serverId?.let { cache.messages(it, session.id) }.orEmpty()
-      mutable.update { current -> current.copy(error = error.message, cached = cached.isNotEmpty()) }
+      if (token == generation) mutable.update { current -> current.copy(error = error.message, cached = cached.isNotEmpty()) }
       if (cached.isEmpty()) return else cached
     }
+    if (token != generation) return
     mutable.value.serverId?.let { cache.saveMessages(it, session.id, messages) }
-    if (mutable.value.sessionId != session.id) return
+    if (token != generation || mutable.value.sessionId != session.id) return
     mutable.update { it.copy(messages = messages) }
     if (ancillary) {
       val todos = runCatching { client.todos(session) }.getOrDefault(emptyList())
       val children = runCatching { client.children(session) }.getOrDefault(emptyList())
       val changes = runCatching { client.diff(session) }.getOrDefault(emptyList())
-      if (mutable.value.sessionId == session.id) mutable.update { it.copy(todos = todos, children = children, changes = changes,
+      if (token == generation && mutable.value.sessionId == session.id) mutable.update { it.copy(todos = todos, children = children, changes = changes,
         sessions = (it.sessions + children).distinctBy { item -> item.id }.sortedByDescending { item -> item.updated }) }
     }
   }
@@ -255,15 +292,18 @@ class MobileController private constructor(private val context: Context) {
     selectSession(session.id)
   }
   fun send(text: String, accepted: (() -> Unit)? = null) = act {
-    val session = state.value.session ?: error("先打开会话")
-    val client = requireNotNull(api)
-    val command = if (text.startsWith('/')) state.value.commands.firstOrNull { text.substringAfter('/').substringBefore(' ') == it.name } else null
-    if (command != null) client.command(session, command.name, text.substringAfter(' ', ""), state.value.agent, state.value.model)
-    else client.send(session, text, state.value.agent, state.value.model)
-    accepted?.invoke()
-    mutable.update { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送"))) }
-    TaskMonitorService.start(context, requireNotNull(state.value.server).id, session.id)
-    loadSession(session, ancillary = false)
+    sendMutex.withLock {
+      val session = state.value.session ?: error("先打开会话")
+      if (state.value.tasks[session.id]?.active == true) error("当前会话仍在处理上一项任务")
+      val client = requireNotNull(api)
+      val command = if (text.startsWith('/')) state.value.commands.firstOrNull { text.substringAfter('/').substringBefore(' ') == it.name } else null
+      if (command != null) client.command(session, command.name, text.substringAfter(' ', ""), state.value.agent, state.value.model)
+      else client.send(session, text, state.value.agent, state.value.model)
+      accepted?.invoke()
+      mutable.update { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送"))) }
+      TaskMonitorService.start(context, requireNotNull(state.value.server).id, session.id)
+      loadSession(session, ancillary = false, token = generation)
+    }
   }
   fun abort() = withSession { client, session -> client.abort(session); mutable.update { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止"))) } }
   fun rename(title: String) = withSession { client, session -> client.renameSession(session, title); reload() }
@@ -271,7 +311,7 @@ class MobileController private constructor(private val context: Context) {
   fun fork() = withSession { client, session -> val fork = client.forkSession(session); reload(); delay(300); selectSession(fork.id) }
   fun share() = withSession { client, session -> val url = client.share(session); mutable.update { it.copy(error = "分享链接：$url") } }
   fun unshare() = withSession { client, session -> client.unshare(session) }
-  fun summarize() = withSession { client, session -> client.summarize(session, state.value.model ?: error("请先选择模型")) }
+  fun summarize() = withSession { client, session -> client.summarize(session, state.value.model) }
   fun revert(messageId: String) = withSession { client, session -> client.revert(session, messageId); loadSession(session) }
   fun unrevert() = withSession { client, session -> client.unrevert(session); loadSession(session) }
   fun replyPermission(request: PermissionRequest, reply: String) = act {
@@ -289,12 +329,12 @@ class MobileController private constructor(private val context: Context) {
   fun listFiles(path: String = ".") = act {
     val directory = state.value.project?.directory ?: error("先选择项目")
     val files = requireNotNull(api).files(directory, path)
-    mutable.update { it.copy(files = files, filePath = path, fileText = null) }
+    mutable.update { it.copy(files = files, filePath = path, fileText = null, fileBinary = false) }
   }
   fun readFile(path: String) = act {
     val directory = state.value.project?.directory ?: error("先选择项目")
     val content = requireNotNull(api).fileContent(directory, path)
-    mutable.update { it.copy(fileText = content, filePath = path) }
+    mutable.update { it.copy(fileText = content.content.takeIf { value -> content.type != "binary" }, fileBinary = content.type == "binary", filePath = path) }
   }
   fun searchFiles(query: String) = act {
     val directory = state.value.project?.directory ?: error("先选择项目")
@@ -303,7 +343,7 @@ class MobileController private constructor(private val context: Context) {
   }
   fun registerPush(token: String) = act {
     val profile = state.value.server ?: error("先连接服务器")
-    com.igng.opencode.mobile.push.PushRegistration(context).register(profile, store.password(profile.id), token, store.deviceId())
+    com.igng.opencode.mobile.push.PushRegistration(context).register(profile, store.credentials(profile.id), token, store.deviceId())
   }
   private fun withSession(block: suspend (OpenCodeApi, Session) -> Unit) = act { block(requireNotNull(api), state.value.session ?: error("先打开会话")) }
   private fun act(block: suspend () -> Unit): Job = scope.launch {

@@ -10,7 +10,8 @@ data class ServerProfile(
   val username: String = "opencode",
   val autoConnect: Boolean = true,
   val notifications: Boolean = true,
-  val companionUrl: String = ""
+  val companionUrl: String = "",
+  val allowCleartext: Boolean = false
 )
 
 data class Project(val id: String, val directory: String, val name: String)
@@ -25,15 +26,43 @@ data class MessagePart(
   val status: String = "",
   val input: String = "",
   val output: String = "",
-  val path: String = ""
+  val path: String = "",
+  val error: String = "",
+  val patch: String = "",
+  val files: List<String> = emptyList(),
+  val attachments: List<String> = emptyList()
 )
-data class PermissionRequest(val id: String, val sessionId: String, val directory: String, val action: String, val detail: String)
+data class PermissionRequest(
+  val id: String,
+  val sessionId: String,
+  val directory: String,
+  val action: String,
+  val detail: String,
+  val always: List<String> = emptyList(),
+  val toolMessageId: String = "",
+  val toolCallId: String = ""
+)
 data class QuestionOption(val label: String, val description: String)
-data class QuestionPrompt(val title: String, val options: List<QuestionOption>, val multiple: Boolean)
+data class QuestionPrompt(
+  val title: String,
+  val options: List<QuestionOption>,
+  val multiple: Boolean,
+  val header: String = "",
+  val custom: Boolean = false
+)
 data class QuestionRequest(val id: String, val sessionId: String, val directory: String, val questions: List<QuestionPrompt>)
 data class TodoItem(val content: String, val status: String, val priority: String)
-data class FileChange(val path: String, val before: String, val after: String, val additions: Int, val deletions: Int)
-data class FileNode(val path: String, val type: String)
+data class FileChange(
+  val path: String,
+  val before: String,
+  val after: String,
+  val additions: Int,
+  val deletions: Int,
+  val patch: String = "",
+  val status: String = "modified"
+)
+data class FileNode(val path: String, val type: String, val name: String = "", val absolute: String = "", val ignored: Boolean = false)
+data class FileContent(val type: String, val content: String, val encoding: String = "", val mimeType: String = "")
 data class ModelChoice(val providerId: String, val modelId: String, val label: String)
 data class AgentChoice(val name: String, val description: String)
 data class CommandChoice(val name: String, val description: String)
@@ -48,27 +77,83 @@ internal fun JSONObject.obj(key: String): JSONObject = optJSONObject(key) ?: JSO
 internal fun JSONObject.arr(key: String): JSONArray = optJSONArray(key) ?: JSONArray()
 internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 internal fun JSONObject.longPath(parent: String, child: String): Long = obj(parent).optLong(child, 0)
+internal fun JSONObject.errorMessage(key: String = "error"): String {
+  val direct = str("message")
+  if (direct.isNotBlank()) return direct
+  val value = opt(key)
+  if (value is JSONObject) {
+    return value.str("message").ifBlank { value.obj("data").str("message") }
+  }
+  return value?.toString().orEmpty().takeUnless { it == "null" }.orEmpty()
+}
+
+private fun JSONObject.valueText(key: String): String {
+  val value = opt(key) ?: return ""
+  return when (value) {
+    is JSONObject -> value.toString(2)
+    is JSONArray -> value.toString(2)
+    JSONObject.NULL -> ""
+    else -> value.toString()
+  }
+}
 
 internal fun JSONObject.toProject(): Project {
   val directory = str("worktree").ifBlank { str("directory") }
   return Project(str("id"), directory, str("name").ifBlank { directory.substringAfterLast('/') })
 }
 internal fun JSONObject.toSession(): Session = Session(
-  str("id"), str("directory"), str("title").ifBlank { "未命名会话" }, longPath("time", "updated"),
-  str("parentID").ifBlank { null }
+  str("id"), str("directory").ifBlank { obj("location").str("directory") },
+  str("title").ifBlank { "未命名会话" }, longPath("time", "updated"), str("parentID").ifBlank { null }
 )
 internal fun JSONObject.toMessage(): Message {
   val info = obj("info")
+  if (info.length() == 0 && str("type").isNotBlank()) return toV2Message()
   val parts = arr("parts").objects().map { part ->
     val state = part.obj("state")
+    val type = part.str("type")
+    val files = (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) }
+    val attachments = state.arr("attachments").objects().map { it.str("filename").ifBlank { it.str("url") } }
     MessagePart(
-      id = part.str("id"), type = part.str("type"), text = part.str("text"), tool = part.str("tool"),
-      title = state.str("title"), status = state.str("status"), input = state.optJSONObject("input")?.toString(2) ?: "",
-      output = state.str("output"), path = part.str("filename").ifBlank { part.str("path") }
+      id = part.str("id"), type = type,
+      text = part.str("text").ifBlank { part.str("description").ifBlank { part.str("prompt") } }, tool = part.str("tool"),
+      title = state.str("title"), status = state.str("status"), input = state.valueText("input"),
+      output = state.valueText("output").ifBlank { state.valueText("result") }, path = part.str("filename").ifBlank { part.str("path").ifBlank { part.str("url") } },
+      error = state.errorMessage().ifBlank { part.errorMessage() }, patch = part.str("patch"), files = files, attachments = attachments
     )
   }
   return Message(info.str("id"), info.str("role"), info.longPath("time", "created"), parts,
-    info.optJSONObject("error")?.optString("message"))
+    info.errorMessage().ifBlank { null })
+}
+
+private fun JSONObject.toV2Message(): Message {
+  val type = str("type")
+  val role = when (type) {
+    "user" -> "user"
+    "assistant" -> "assistant"
+    else -> "system"
+  }
+  val parts = when (type) {
+    "assistant" -> arr("content").objects().map { part ->
+      val state = part.obj("state")
+      val attachments = state.arr("attachments").objects().map { it.str("name").ifBlank { it.str("url") } }
+      val outputPaths = (0 until state.arr("outputPaths").length()).mapNotNull { index ->
+        state.arr("outputPaths").optString(index).takeIf(String::isNotBlank)
+      }
+      MessagePart(
+        id = part.str("id"), type = part.str("type"), text = part.str("text"), tool = part.str("name"),
+        status = state.str("status"), input = state.valueText("input"),
+        output = state.valueText("result").ifBlank { state.valueText("content") },
+        error = state.errorMessage().ifBlank { part.errorMessage() },
+        files = outputPaths, attachments = attachments
+      )
+    }
+    "shell" -> listOf(MessagePart(str("id"), "tool", text = str("command"), tool = "shell", output = str("output")))
+    else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) })
+  }
+  return Message(
+    id = str("id"), role = role, created = longPath("time", "created"), parts = parts,
+    error = errorMessage().ifBlank { null }
+  )
 }
 internal fun JSONObject.toPermission(directory: String): PermissionRequest {
   val detail = when {
@@ -76,18 +161,31 @@ internal fun JSONObject.toPermission(directory: String): PermissionRequest {
     arr("resources").length() > 0 -> arr("resources").toString()
     else -> obj("metadata").toString()
   }
-  return PermissionRequest(str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
-    str("permission").ifBlank { str("action") }, detail)
+  val tool = obj("tool")
+  return PermissionRequest(
+    str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
+    str("permission").ifBlank { str("action") }, detail,
+    (0 until arr("always").length()).mapNotNull { index -> arr("always").optString(index).takeIf(String::isNotBlank) },
+    tool.str("messageID"), tool.str("callID")
+  )
 }
 internal fun JSONObject.toQuestion(directory: String): QuestionRequest = QuestionRequest(
   str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
   arr("questions").objects().map { q -> QuestionPrompt(
-    q.str("question"), q.arr("options").objects().map { QuestionOption(it.str("label"), it.str("description")) }, q.optBoolean("multiple")
+    q.str("question"), q.arr("options").objects().map { QuestionOption(it.str("label"), it.str("description")) },
+    q.optBoolean("multiple"), q.str("header"), q.optBoolean("custom")
   ) }
 )
 internal fun JSONObject.toTodo(): TodoItem = TodoItem(str("content"), str("status"), str("priority"))
-internal fun JSONObject.toChange(): FileChange = FileChange(str("file"), str("before"), str("after"), optInt("additions"), optInt("deletions"))
-internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"))
+internal fun JSONObject.toChange(): FileChange = FileChange(
+  path = str("file"), before = str("before"), after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
+  patch = str("patch"), status = str("status").ifBlank { "modified" }
+)
+internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"), str("name"), str("absolute"), optBoolean("ignored"))
+internal fun JSONObject.toFileContent(): FileContent = FileContent(
+  str("type").ifBlank { if (str("encoding") == "base64") "binary" else "text" },
+  str("content"), str("encoding"), str("mimeType")
+)
 
 object TaskReducer {
   fun status(sessionId: String, status: String, previous: TaskState? = null): TaskState = when (status) {
@@ -111,10 +209,12 @@ object TaskReducer {
     return when (type) {
       "session.status" -> status(sessionId, properties.obj("status").str("type"), previous)
       "session.idle" -> status(sessionId, "idle", previous)
-      "session.error" -> TaskState(sessionId, TaskPhase.FAILED, properties.obj("error").str("message").ifBlank { "执行失败" }, since)
+      "session.error" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since)
       "session.aborted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since)
       "permission.asked" -> TaskState(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", since)
       "question.asked" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
+      "permission.replied", "permission.rejected", "question.replied", "question.rejected" ->
+        TaskState(sessionId, TaskPhase.THINKING, "继续执行", since)
       "message.part.updated" -> {
         val part = properties.obj("part")
         when {
@@ -126,7 +226,8 @@ object TaskReducer {
               tool in listOf("bash", "shell") && Regex("(?i)(test|gradle|pytest|vitest|jest)").containsMatchIn(part.obj("state").obj("input").toString()) -> TaskPhase.TESTING
               else -> TaskPhase.TOOL
             }
-            TaskState(sessionId, phase, part.obj("state").str("title").ifBlank { "正在运行 $tool" }, since)
+            val state = part.obj("state")
+            TaskState(sessionId, phase, state.str("title").ifBlank { state.str("error") }.ifBlank { "正在运行 $tool" }, since)
           }
           else -> previous
         }
