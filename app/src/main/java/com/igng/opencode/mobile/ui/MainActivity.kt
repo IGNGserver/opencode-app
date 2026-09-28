@@ -14,6 +14,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -25,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalDensity
 import com.igng.opencode.mobile.core.MobileController
-import com.igng.opencode.mobile.core.MobileState
 import com.igng.opencode.mobile.push.PushRegistration
 
 private enum class RootTab(val label: String) {
@@ -42,8 +42,8 @@ class MainActivity : ComponentActivity() {
       val state by controller.state.collectAsState()
       val preferences = remember { getSharedPreferences("ui", MODE_PRIVATE) }
       var dark by remember { mutableStateOf(preferences.getBoolean("dark", false)) }
-      var currentTab by remember { mutableStateOf(RootTab.HOME) }
-      var inChatDetail by remember { mutableStateOf(false) }
+      var currentTab by rememberSaveable { mutableStateOf(RootTab.HOME) }
+      var inChatDetail by rememberSaveable { mutableStateOf(false) }
       var showingServersSheet by remember { mutableStateOf(false) }
       val snackbar = remember { SnackbarHostState() }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -56,6 +56,11 @@ class MainActivity : ComponentActivity() {
         val error = state.error ?: return@LaunchedEffect
         snackbar.showSnackbar(error)
         controller.clearError()
+      }
+      LaunchedEffect(state.message) {
+        val message = state.message ?: return@LaunchedEffect
+        snackbar.showSnackbar(message)
+        controller.clearMessage()
       }
       LaunchedEffect(state.serverId) {
         val profile = state.server ?: return@LaunchedEffect

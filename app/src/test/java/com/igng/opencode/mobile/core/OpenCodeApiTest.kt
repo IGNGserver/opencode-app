@@ -208,6 +208,30 @@ class OpenCodeApiTest {
     assertEquals(listOf("out.txt"), v2.files)
   }
 
+  @Test fun modelsExposeTheFieldsTheUiReads() {
+    val change = JSONObject("""{"file":"a.kt","before":"old","after":"new","additions":3,"deletions":1,"patch":"@@","status":"modified"}""").toChange()
+    assertEquals("a.kt", change.path)
+    assertEquals("new", change.after)
+    assertEquals(3, change.additions)
+    val node = JSONObject("""{"path":"src/a.kt","type":"file","name":"a.kt","absolute":"/x","ignored":true}""").toNode()
+    assertEquals("src/a.kt", node.path)
+    assertEquals("a.kt", node.name)
+    val text = JSONObject("""{"type":"text","content":"hi","encoding":"utf-8","mimeType":"text/plain"}""").toFileContent()
+    assertEquals("text", text.type)
+    assertEquals("hi", text.content)
+    val binary = JSONObject("""{"content":"AAA=","encoding":"base64"}""").toFileContent()
+    assertEquals("binary", binary.type)
+  }
+
+  @Test fun protocolCapabilitiesMatchTheApiBranches() {
+    assertTrue(ServerProtocol.V1.supportsSessionActions)
+    assertTrue(ServerProtocol.V1.supportsTitleOnCreate)
+    assertTrue(ServerProtocol.V1.supportsTodosAndDiff)
+    assertFalse(ServerProtocol.V2.supportsSessionActions)
+    assertFalse(ServerProtocol.V2.supportsTitleOnCreate)
+    assertFalse(ServerProtocol.V2.supportsTodosAndDiff)
+  }
+
   @Test fun pushSignatureMatchesCompanionVector() {
     val data = mapOf(
       "sessionId" to "ses-1", "serverId" to "srv-1", "phase" to "WAITING_PERMISSION",

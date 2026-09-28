@@ -38,7 +38,7 @@ fun ChatScreen(
 ) {
   val session = state.session
   val availableTabs = remember(state.protocol) {
-    if (state.protocol == ServerProtocol.V2) {
+    if (!state.protocol.supportsTodosAndDiff) {
       listOf(DetailTab.CHAT, DetailTab.FILES, DetailTab.CHILDREN)
     } else {
       DetailTab.entries
@@ -144,7 +144,7 @@ fun ChatScreen(
       Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("会话管理与快捷动作", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 6.dp))
 
-        if (state.protocol == ServerProtocol.V1) {
+        if (state.protocol.supportsSessionActions) {
           ActionRow("✏️ 重命名会话") { menuSheet = false; title = session.title; rename = true }
           ActionRow("🌿 分支 / 分叉会话 (Fork)") { menuSheet = false; controller.fork() }
           ActionRow("🔗 分享链接") { menuSheet = false; controller.share() }
@@ -155,7 +155,7 @@ fun ChatScreen(
         ActionRow("↩️ 撤销到上一条消息 (Revert)") { menuSheet = false; state.messages.lastOrNull()?.let { controller.revert(it.id) } }
         ActionRow("↪️ 恢复撤销 (Unrevert)") { menuSheet = false; controller.unrevert() }
 
-        if (state.protocol == ServerProtocol.V1) {
+        if (state.protocol.supportsSessionActions) {
           HorizontalDivider(Modifier.padding(vertical = 4.dp))
           ActionRow("🗑️ 删除此会话", isDestructive = true) { menuSheet = false; delete = true }
         }
@@ -700,7 +700,7 @@ private fun ActionChip(label: String, onClick: () -> Unit) {
 private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     if (todos.isEmpty()) item {
-      Text(if (protocol == ServerProtocol.V2) "当前 OpenCode V2 未提供独立待办列表。" else "当前会话暂无待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text(if (!protocol.supportsTodosAndDiff) "当前 OpenCode V2 未提供独立待办列表。" else "当前会话暂无待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     items(todos) { todo ->
       FluentCard {
@@ -719,7 +719,7 @@ private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier:
 private fun ChangesPanel(changes: List<FileChange>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     if (changes.isEmpty()) item {
-      Text(if (protocol == ServerProtocol.V2) "当前 OpenCode V2 接口未暴露独立差异汇总。" else "暂无文件改动记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text(if (!protocol.supportsTodosAndDiff) "当前 OpenCode V2 接口未暴露独立差异汇总。" else "暂无文件改动记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     items(changes) { change ->
       var open by remember(change.path) { mutableStateOf(false) }

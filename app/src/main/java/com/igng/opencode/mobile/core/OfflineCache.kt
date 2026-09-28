@@ -1,9 +1,6 @@
 package com.igng.opencode.mobile.core
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -11,23 +8,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
-import java.security.KeyStore
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 class OfflineCache(context: Context) {
   private val preferences = context.getSharedPreferences("offline_cache", Context.MODE_PRIVATE)
-  private val alias = "opencode-mobile-offline-cache"
-  private val key: SecretKey by lazy {
-    val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    (store.getKey(alias, null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
-      init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-        .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
-      generateKey()
-    }
-  }
+  private val cipher = KeystoreCipher("opencode-mobile-offline-cache")
   private val writes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val pendingLock = Any()
   private val pending = HashMap<String, String>()
@@ -53,10 +37,7 @@ class OfflineCache(context: Context) {
           pending.toMap().also { pending.clear() }
         }
         for ((name, value) in batch) {
-          val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-          cipher.init(Cipher.ENCRYPT_MODE, key)
-          val payload = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-          preferences.edit().putString(name, Base64.encodeToString(payload, Base64.NO_WRAP)).apply()
+          preferences.edit().putString(name, cipher.encrypt(value)).apply()
         }
       }
     } catch (_: Exception) {
@@ -65,10 +46,8 @@ class OfflineCache(context: Context) {
     }
   }
   private fun read(name: String): String? = try {
-    val payload = Base64.decode(preferences.getString(name, null) ?: return null, Base64.NO_WRAP)
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, payload.copyOfRange(0, 12)))
-    String(cipher.doFinal(payload.copyOfRange(12, payload.size)), Charsets.UTF_8)
+    val encoded = preferences.getString(name, null) ?: return null
+    cipher.decrypt(encoded)
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "读取 $name 失败", error)
     null

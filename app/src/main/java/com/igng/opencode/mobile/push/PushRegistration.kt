@@ -36,7 +36,6 @@ class PushRegistration(private val context: Context) {
     .dispatcher(SharedHttp.dispatcher)
     .build()
   fun available(): Boolean = FirebaseApp.getApps(context).isNotEmpty()
-  fun enableFor(profile: ServerProfile, password: String, deviceId: String) = enableFor(profile, ServerCredentials(profile.username, password), deviceId)
   fun enableFor(profile: ServerProfile, credentials: ServerCredentials, deviceId: String) {
     if (!available() || profile.companionUrl.isBlank() || !profile.notifications) return
     FirebaseMessaging.getInstance().isAutoInitEnabled = true
@@ -48,8 +47,6 @@ class PushRegistration(private val context: Context) {
       }
     }
   }
-  suspend fun register(profile: ServerProfile, password: String, token: String, deviceId: String) =
-    register(profile, ServerCredentials(profile.username, password), token, deviceId)
   suspend fun register(profile: ServerProfile, credentials: ServerCredentials, token: String, deviceId: String) = withContext(Dispatchers.IO) {
     if (profile.companionUrl.isBlank()) return@withContext
     val endpoint = URI(profile.companionUrl.trimEnd('/') + "/v1/devices")

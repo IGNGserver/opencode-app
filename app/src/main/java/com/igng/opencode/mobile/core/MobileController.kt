@@ -20,11 +20,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
-import java.util.UUID
 
 data class MobileState(
   val profiles: List<ServerProfile> = emptyList(), val serverId: String? = null, val version: String = "", val protocol: ServerProtocol = ServerProtocol.UNKNOWN,
   val connected: Boolean = false, val cached: Boolean = false, val loading: Boolean = false, val error: String? = null,
+  /** Non-error feedback (e.g. a share link); kept separate so it is not rendered as a failure. */
+  val message: String? = null,
   val projects: List<Project> = emptyList(), val projectId: String? = null,
   val sessions: List<Session> = emptyList(), val sessionId: String? = null,
   val messages: List<Message> = emptyList(), val tasks: Map<String, TaskState> = emptyMap(),
@@ -68,10 +69,8 @@ class MobileController private constructor(private val context: Context) {
   private val sendMutex = Mutex()
 
   init { if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
-  fun password(serverId: String): String = store.password(serverId)
   fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
   fun deviceId(): String = store.deviceId()
-  suspend fun testServer(profile: ServerProfile, password: String): String = testServer(profile, ServerCredentials(profile.username, password))
   suspend fun testServer(profile: ServerProfile, credentials: ServerCredentials): String {
     val client = OpenCodeApi(profile, credentials)
     val version = client.health()
@@ -79,6 +78,7 @@ class MobileController private constructor(private val context: Context) {
     return version
   }
   fun clearError() = mutable.update { it.copy(error = null) }
+  fun clearMessage() = mutable.update { it.copy(message = null) }
 
   fun saveServer(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null, connect: Boolean = true) {
     store.save(profile, password, cookie, credentialUsername)
@@ -371,7 +371,7 @@ class MobileController private constructor(private val context: Context) {
   fun rename(title: String) = withSession { client, session -> client.renameSession(session, title); reload() }
   fun deleteSession() = withSession { client, session -> client.deleteSession(session); mutable.update { it.copy(sessionId = null, messages = emptyList()) }; reload() }
   fun fork() = withSession { client, session -> val fork = client.forkSession(session); reload(); delay(300); selectSession(fork.id) }
-  fun share() = withSession { client, session -> val url = client.share(session); mutable.update { it.copy(error = "分享链接：$url") } }
+  fun share() = withSession { client, session -> val url = client.share(session); mutable.update { it.copy(message = "分享链接：$url") } }
   fun unshare() = withSession { client, session -> client.unshare(session) }
   fun summarize() = withSession { client, session -> client.summarize(session, state.value.model) }
   fun revert(messageId: String) = withSession { client, session -> client.revert(session, messageId); loadSession(session) }
