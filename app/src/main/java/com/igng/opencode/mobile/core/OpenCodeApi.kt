@@ -41,6 +41,8 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(25, TimeUnit.SECONDS)
     .callTimeout(60, TimeUnit.SECONDS)
+    .connectionPool(SharedHttp.connectionPool)
+    .dispatcher(SharedHttp.dispatcher)
     .build()
   private val streamClient = client.newBuilder()
     .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -439,17 +441,22 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
 
   private fun isTextFile(path: String, contentType: String): Boolean {
     val mime = contentType.substringBefore(';').trim().lowercase()
-    if (mime.startsWith("text/") || mime in setOf("application/json", "application/xml", "application/javascript", "application/x-javascript")) return true
+    if (mime.startsWith("text/") || mime in TEXT_MIME_TYPES) return true
     val name = path.substringAfterLast('/').lowercase()
-    if (name in setOf("dockerfile", "makefile", "license", "readme", "changelog", ".gitignore", ".gitattributes", ".env")) return true
+    if (name in TEXT_FILE_NAMES) return true
     val extension = name.substringAfterLast('.', "")
-    if (extension in setOf(
-        "txt", "md", "markdown", "rst", "json", "jsonc", "yaml", "yml", "toml", "xml", "html", "htm", "css", "scss", "less",
-        "js", "jsx", "ts", "tsx", "vue", "svelte", "kt", "kts", "java", "groovy", "gradle", "py", "rb", "go", "rs", "c", "cc",
-        "cpp", "h", "hh", "hpp", "sh", "bash", "zsh", "sql", "swift", "php", "pl", "ini", "cfg", "conf", "properties",
-        "env", "gitignore", "gitattributes", "bat", "cmd", "ps1", "tf", "hcl", "proto", "graphql", "lock", "svg", "tex", "diff", "patch"
-      )) return true
-    return false
+    return extension in TEXT_EXTENSIONS
+  }
+
+  private companion object {
+    val TEXT_MIME_TYPES = setOf("application/json", "application/xml", "application/javascript", "application/x-javascript")
+    val TEXT_FILE_NAMES = setOf("dockerfile", "makefile", "license", "readme", "changelog", ".gitignore", ".gitattributes", ".env")
+    val TEXT_EXTENSIONS = setOf(
+      "txt", "md", "markdown", "rst", "json", "jsonc", "yaml", "yml", "toml", "xml", "html", "htm", "css", "scss", "less",
+      "js", "jsx", "ts", "tsx", "vue", "svelte", "kt", "kts", "java", "groovy", "gradle", "py", "rb", "go", "rs", "c", "cc",
+      "cpp", "h", "hh", "hpp", "sh", "bash", "zsh", "sql", "swift", "php", "pl", "ini", "cfg", "conf", "properties",
+      "env", "gitignore", "gitattributes", "bat", "cmd", "ps1", "tf", "hcl", "proto", "graphql", "lock", "svg", "tex", "diff", "patch"
+    )
   }
 }
 

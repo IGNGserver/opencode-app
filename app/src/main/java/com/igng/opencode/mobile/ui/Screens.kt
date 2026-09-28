@@ -66,9 +66,25 @@ fun HomeScreen(
   onServers: () -> Unit,
   onSessions: () -> Unit
 ) {
-  val running = state.sessions.filter { state.tasks[it.id]?.phase in setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING) }
-  val waiting = state.sessions.filter { state.tasks[it.id]?.phase in setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION) }
-  val recent = state.sessions.filterNot { it in running || it in waiting }.take(8)
+  // Derive the three sections once per session/task change instead of re-filtering every session
+  // three times on each recomposition, and use sets so membership stays O(1) rather than O(n).
+  val sections = remember(state.sessions, state.tasks) {
+    val running = ArrayList<Session>()
+    val waiting = ArrayList<Session>()
+    val recent = ArrayList<Session>()
+    for (session in state.sessions) {
+      val phase = state.tasks[session.id]?.phase
+      when (phase) {
+        in TaskState.RUNNING_PHASES -> running += session
+        in TaskState.WAITING_PHASES -> waiting += session
+        else -> if (recent.size < 8) recent += session
+      }
+    }
+    Triple(running, waiting, recent)
+  }
+  val running = sections.first
+  val waiting = sections.second
+  val recent = sections.third
 
   LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
     item {
@@ -232,8 +248,24 @@ fun SessionRow(session: Session, task: TaskState?, onClick: () -> Unit) {
     }
   }
 }
-
-fun formatDate(timestamp: Long): String = if (timestamp <= 0) "" else DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(timestamp))
+// DateFormat instances are not thread-safe, but Compose UI calls this on the main thread only.
+// Reuse one formatter per locale instead of allocating a fresh one for every visible list row on
+// every recomposition; the locale key keeps a system locale change reflected.
+private class DateFormatterCache {
+  private var locale: java.util.Locale? = null
+  private var formatter: DateFormat? = null
+  fun get(current: java.util.Locale): DateFormat {
+    val cached = formatter
+    if (cached != null && locale == current) return cached
+    return DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, current).also {
+      locale = current
+      formatter = it
+    }
+  }
+}
+private val sessionDateFormatters = DateFormatterCache()
+private fun formatDate(timestamp: Long): String =
+  if (timestamp <= 0) "" else sessionDateFormatters.get(java.util.Locale.getDefault()).format(Date(timestamp))
 
 @Composable
 fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (String) -> Unit) {

@@ -15,12 +15,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 class TaskMonitorService : Service() {
   companion object {
     private const val FOREGROUND_ID = 1001
+    private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)
     fun start(context: Context, serverId: String, sessionId: String) {
       val intent = Intent(context, TaskMonitorService::class.java).putExtra("serverId", serverId).putExtra("sessionId", sessionId)
       androidx.core.content.ContextCompat.startForegroundService(context, intent)
@@ -29,6 +30,7 @@ class TaskMonitorService : Service() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var monitor: Job? = null
   private val tracked = linkedSetOf<Pair<String, String>>()
+  private val lastShown = HashMap<Pair<String, String>, Pair<TaskPhase, String>>()
   override fun onBind(intent: Intent?): IBinder? = null
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val serverId = intent?.getStringExtra("serverId") ?: return START_NOT_STICKY
@@ -44,17 +46,28 @@ class TaskMonitorService : Service() {
     if (controller.state.value.serverId != serverId) controller.connect(serverId)
     if (monitor == null) {
       monitor = scope.launch {
-        controller.state.collectLatest { state ->
-          tracked.toList().forEach { (trackedServerId, trackedSessionId) ->
+        // Plain collect (not collectLatest): emissions are frequent during streaming, and cancelling
+        // the previous handler on every emission needlessly restarted notification work.
+        controller.state.collect { state ->
+          tracked.toList().forEach { key ->
+            val (trackedServerId, trackedSessionId) = key
             if (trackedServerId != state.serverId) return@forEach
             val trackedProfile = state.profiles.firstOrNull { it.id == trackedServerId } ?: profile
             val session = state.sessions.firstOrNull { it.id == trackedSessionId } ?: Session(trackedSessionId, "", "OpenCode 任务", 0)
             val task = state.tasks[trackedSessionId] ?: return@forEach
-            if (task.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) {
-              notifications.show(trackedProfile, session, task)
-              tracked.remove(trackedServerId to trackedSessionId)
+            val terminal = task.phase in TERMINAL_PHASES
+            // state emits very frequently while streaming; only rebuild and re-post a notification
+            // when the phase or detail actually changed since the last post for this session.
+            val signature = task.phase to task.detail
+            val changed = lastShown[key] != signature
+            if (terminal) {
+              if (changed) { notifications.show(trackedProfile, session, task); lastShown.remove(key) }
+              tracked.remove(key)
             } else if (task.active) {
-              notifications.show(trackedProfile, session, task, state.permissions.firstOrNull { it.sessionId == trackedSessionId })
+              if (changed) {
+                notifications.show(trackedProfile, session, task, state.permissions.firstOrNull { it.sessionId == trackedSessionId })
+                lastShown[key] = signature
+              }
             }
           }
           if (tracked.isEmpty()) {
@@ -67,5 +80,5 @@ class TaskMonitorService : Service() {
     return START_REDELIVER_INTENT
   }
   override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }
-  override fun onDestroy() { tracked.clear(); monitor?.cancel(); super.onDestroy() }
+  override fun onDestroy() { tracked.clear(); lastShown.clear(); monitor?.cancel(); super.onDestroy() }
 }

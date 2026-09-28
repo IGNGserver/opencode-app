@@ -4,6 +4,11 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -23,11 +28,41 @@ class OfflineCache(context: Context) {
       generateKey()
     }
   }
+  private val writes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  private val pendingLock = Any()
+  private val pending = HashMap<String, String>()
+  private var writer: Job? = null
+  // Serialization and AES-GCM encryption of large transcripts are CPU-bound. Queue them on a
+  // dedicated IO scope so refreshing a session never blocks the UI thread. Draining a snapshot of
+  // the pending map means a fast stream cannot grow an unbounded encryption backlog and the latest
+  // value for a key always wins, while writes stay ordered.
   private fun write(name: String, value: String) {
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, key)
-    val payload = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-    preferences.edit().putString(name, Base64.encodeToString(payload, Base64.NO_WRAP)).apply()
+    synchronized(pendingLock) {
+      pending[name] = value
+      if (writer == null) writer = writes.launch { drainWrites() }
+    }
+  }
+  private suspend fun drainWrites() {
+    try {
+      while (true) {
+        val batch = synchronized(pendingLock) {
+          if (pending.isEmpty()) {
+            writer = null
+            return
+          }
+          pending.toMap().also { pending.clear() }
+        }
+        for ((name, value) in batch) {
+          val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+          cipher.init(Cipher.ENCRYPT_MODE, key)
+          val payload = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+          preferences.edit().putString(name, Base64.encodeToString(payload, Base64.NO_WRAP)).apply()
+        }
+      }
+    } catch (_: Exception) {
+      // A failed write must not wedge the drain loop; the next enqueue restarts it.
+      synchronized(pendingLock) { writer = null }
+    }
   }
   private fun read(name: String): String? = try {
     val payload = Base64.decode(preferences.getString(name, null) ?: return null, Base64.NO_WRAP)
@@ -74,8 +109,11 @@ class OfflineCache(context: Context) {
   } catch (_: Exception) { emptyList() }
   }
   fun delete(serverId: String) {
-    preferences.edit().apply {
-      preferences.all.keys.filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.forEach(::remove)
-    }.apply()
+    synchronized(pendingLock) {
+      pending.keys.removeAll { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }
+      preferences.edit().apply {
+        preferences.all.keys.filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.forEach(::remove)
+      }.apply()
+    }
   }
 }

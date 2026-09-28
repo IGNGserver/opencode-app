@@ -20,6 +20,8 @@ object PairLinkResolver {
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(15, TimeUnit.SECONDS)
     .callTimeout(30, TimeUnit.SECONDS)
+    .connectionPool(SharedHttp.connectionPool)
+    .dispatcher(SharedHttp.dispatcher)
     .build()
 
   fun isPairLink(value: String): Boolean {

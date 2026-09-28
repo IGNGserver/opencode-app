@@ -28,8 +28,7 @@ class OpenCodeApiTest {
       assertEquals("openai", json.getJSONObject("model").getString("providerID"))
     }
   }
-  @Test fun taskReducerRequiresPriorActivityBeforeIdleBecomesCompletion() {
-    val idle = TaskReducer.status("id", "idle")
+  @Test fun taskReducerRequiresPriorActivityBeforeIdleBecomesCompletion() {    val idle = TaskReducer.status("id", "idle")
     assertEquals(TaskPhase.IDLE, idle.phase)
     val busy = TaskReducer.status("id", "busy", idle)
     assertEquals(TaskPhase.THINKING, busy.phase)
@@ -41,6 +40,17 @@ class OpenCodeApiTest {
     val restarted = TaskReducer.status("id", "busy", completed)
     assertEquals(TaskPhase.THINKING, restarted.phase)
     assertEquals("正在处理", restarted.detail)
+  }
+
+  @Test fun taskPhaseGroupsStayConsistent() {
+    // active must be the union of the running and waiting groups used by the UI filters.
+    assertTrue(TaskState.ACTIVE_PHASES == TaskState.RUNNING_PHASES + TaskState.WAITING_PHASES)
+    assertTrue(TaskState.RUNNING_PHASES.intersect(TaskState.WAITING_PHASES).isEmpty())
+    for (phase in TaskPhase.entries) {
+      assertEquals(phase in TaskState.ACTIVE_PHASES, TaskState("id", phase).active)
+    }
+    assertTrue(TaskState("id", TaskPhase.COMPLETED).active.not())
+    assertTrue(TaskState("id", TaskPhase.DISCONNECTED).active.not())
   }
 
   @Test fun detectsV2AndMapsLocationSessionsStatusAndMessages() = runBlocking {

@@ -77,7 +77,13 @@ class MainActivity : ComponentActivity() {
       }
 
       FluentTheme(dark) {
-        val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+        // Read the IME inset through derivedStateOf so the navigation bar only recomposes when the
+        // keyboard actually opens or closes, not on every state change that reaches this scope.
+        val density = LocalDensity.current
+        val imeInsets = WindowInsets.ime
+        val keyboardOpen by remember(imeInsets, density) {
+          derivedStateOf { imeInsets.getBottom(density) > 0 }
+        }
         Scaffold(
           modifier = Modifier.imePadding(),
           snackbarHost = { SnackbarHost(snackbar) },

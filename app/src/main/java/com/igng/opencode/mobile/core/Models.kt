@@ -69,7 +69,19 @@ data class CommandChoice(val name: String, val description: String)
 
 enum class TaskPhase { IDLE, THINKING, TOOL, SUBAGENT, TESTING, WAITING_PERMISSION, WAITING_QUESTION, COMPLETED, FAILED, ABORTED, DISCONNECTED }
 data class TaskState(val sessionId: String, val phase: TaskPhase, val detail: String = "", val since: Long = System.currentTimeMillis()) {
-  val active: Boolean get() = phase in setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING, TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
+  val active: Boolean get() = when (phase) {
+    TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING, TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION -> true
+    else -> false
+  }
+
+  companion object {
+    /** Phases where the agent is actively working, without an outstanding user prompt. */
+    val RUNNING_PHASES: Set<TaskPhase> = setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING)
+    /** Phases waiting on a user decision. */
+    val WAITING_PHASES: Set<TaskPhase> = setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
+    /** Union of [RUNNING_PHASES] and [WAITING_PHASES], matching [active]. */
+    val ACTIVE_PHASES: Set<TaskPhase> = RUNNING_PHASES + WAITING_PHASES
+  }
 }
 
 internal fun JSONObject.str(key: String): String = optString(key).takeUnless { it == "null" } ?: ""
@@ -188,9 +200,13 @@ internal fun JSONObject.toFileContent(): FileContent = FileContent(
 )
 
 object TaskReducer {
+  private val TEST_COMMAND = Regex("(?i)(test|gradle|pytest|vitest|jest)")
+  private val SUBAGENT_TOOLS = setOf("task", "subagent")
+  private val SHELL_TOOLS = setOf("bash", "shell")
+
   fun status(sessionId: String, status: String, previous: TaskState? = null): TaskState = when (status) {
     "busy", "running" -> {
-      val continuing = previous?.active == true && previous.phase !in setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
+      val continuing = previous?.active == true && previous.phase !in TaskState.WAITING_PHASES
       TaskState(sessionId, if (continuing) previous!!.phase else TaskPhase.THINKING,
         if (continuing) previous!!.detail else "正在处理",
         if (continuing) previous!!.since else System.currentTimeMillis())
@@ -222,8 +238,8 @@ object TaskReducer {
           part.str("type") == "tool" -> {
             val tool = part.str("tool")
             val phase = when {
-              tool in listOf("task", "subagent") -> TaskPhase.SUBAGENT
-              tool in listOf("bash", "shell") && Regex("(?i)(test|gradle|pytest|vitest|jest)").containsMatchIn(part.obj("state").obj("input").toString()) -> TaskPhase.TESTING
+              tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
+              tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(part.obj("state").obj("input").toString()) -> TaskPhase.TESTING
               else -> TaskPhase.TOOL
             }
             val state = part.obj("state")

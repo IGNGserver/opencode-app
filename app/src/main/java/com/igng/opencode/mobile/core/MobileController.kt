@@ -7,6 +7,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +42,12 @@ data class MobileState(
 
 class MobileController private constructor(private val context: Context) {
   companion object {
+    private val CATALOG_REFRESH_EVENTS = setOf(
+      "session.created", "session.updated", "session.deleted", "session.idle", "session.error",
+      "permission.asked", "question.asked", "permission.replied", "permission.rejected",
+      "question.replied", "question.rejected"
+    )
+    private val MESSAGE_REFRESH_EVENTS = setOf("message.updated", "message.part.updated")
     @Volatile private var instance: MobileController? = null
     fun get(context: Context): MobileController = instance ?: synchronized(this) {
       instance ?: MobileController(context.applicationContext).also { instance = it }
@@ -128,12 +137,25 @@ class MobileController private constructor(private val context: Context) {
     val client = api ?: return
     val version = client.health()
     val projects = client.projects()
-    val sessionResults = projects.map { project -> runCatching { client.sessions(project.directory) } }
-    if (sessionResults.isNotEmpty() && sessionResults.all { it.isFailure }) throw sessionResults.first().exceptionOrNull()!!
-    val sessions = sessionResults.flatMap { it.getOrDefault(emptyList()) }.distinctBy { it.id }.sortedByDescending { it.updated }
-    val statuses = projects.flatMap { project -> runCatching { client.status(project.directory).entries }.getOrDefault(emptySet()) }.associate { it.key to it.value }
-    val permissions = projects.flatMap { runCatching { client.permissions(it.directory) }.getOrDefault(emptyList()) }.distinctBy { it.id }
-    val questions = projects.flatMap { runCatching { client.questions(it.directory) }.getOrDefault(emptyList()) }.distinctBy { it.id }
+    // Sessions, statuses, permissions and questions are independent per project; fetch them in
+    // parallel so a multi-project server resolves in roughly one round trip instead of 4*N.
+    val sessions = coroutineScope {
+      val sessionResults = projects.map { project -> async { runCatching { client.sessions(project.directory) } } }.awaitAll()
+      if (sessionResults.isNotEmpty() && sessionResults.all { it.isFailure }) throw sessionResults.first().exceptionOrNull()!!
+      sessionResults.flatMap { it.getOrDefault(emptyList()) }.distinctBy { it.id }.sortedByDescending { it.updated }
+    }
+    val statuses = coroutineScope {
+      projects.map { project -> async { runCatching { client.status(project.directory).entries }.getOrDefault(emptySet()) } }
+        .awaitAll().flatten().associate { it.key to it.value }
+    }
+    val permissions = coroutineScope {
+      projects.map { project -> async { runCatching { client.permissions(project.directory) }.getOrDefault(emptyList()) } }
+        .awaitAll().flatten().distinctBy { it.id }
+    }
+    val questions = coroutineScope {
+      projects.map { project -> async { runCatching { client.questions(project.directory) }.getOrDefault(emptyList()) } }
+        .awaitAll().flatten().distinctBy { it.id }
+    }
     if (token != generation) return
     mutable.value.serverId?.let { cache.saveCatalog(it, projects, sessions) }
     mutable.update { previous ->
@@ -218,10 +240,10 @@ class MobileController private constructor(private val context: Context) {
         mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == requestId }) }
       }
     }
-    if (event.type in setOf("session.created", "session.updated", "session.deleted", "session.idle", "session.error", "permission.asked", "question.asked", "permission.replied", "permission.rejected", "question.replied", "question.rejected")) {
+    if (event.type in CATALOG_REFRESH_EVENTS) {
       eventRefresh?.cancel()
       eventRefresh = scope.launch { delay(350); if (generation > 0) reload() }
-    } else if (event.type in setOf("message.updated", "message.part.updated") && sessionId == mutable.value.sessionId) {
+    } else if (event.type in MESSAGE_REFRESH_EVENTS && sessionId == mutable.value.sessionId) {
       val session = mutable.value.session ?: return
       messageRefresh?.cancel()
       messageRefresh = scope.launch { delay(350); loadSession(session, ancillary = false) }
@@ -243,9 +265,13 @@ class MobileController private constructor(private val context: Context) {
   }
   private suspend fun loadChoices(directory: String, token: Int = generation) {
     val client = api ?: return
-    val agents = runCatching { client.agents(directory) }.getOrDefault(emptyList())
-    val models = runCatching { client.models(directory) }.getOrDefault(emptyList())
-    val commands = runCatching { client.commands(directory) }.getOrDefault(emptyList())
+    // Agents, models and commands are independent; one parallel round instead of three.
+    val (agents, models, commands) = coroutineScope {
+      val agentsTask = async { runCatching { client.agents(directory) }.getOrDefault(emptyList()) }
+      val modelsTask = async { runCatching { client.models(directory) }.getOrDefault(emptyList()) }
+      val commandsTask = async { runCatching { client.commands(directory) }.getOrDefault(emptyList()) }
+      Triple(agentsTask.await(), modelsTask.await(), commandsTask.await())
+    }
     if (token == generation && mutable.value.project?.directory == directory) {
       mutable.update { it.copy(agents = agents, models = models, commands = commands) }
     }
@@ -261,7 +287,8 @@ class MobileController private constructor(private val context: Context) {
     store.rememberLocation(project?.id, id)
     if (!offline) {
       val token = generation
-      scope.launch { loadChoices(session.directory, token); loadSession(session, token = token) }
+      // Choices and the session transcript are independent; run them concurrently.
+      scope.launch { coroutineScope { launch { loadChoices(session.directory, token) }; loadSession(session, token = token) } }
     }
   }
   private suspend fun loadSession(session: Session, ancillary: Boolean = true, token: Int = generation) {
@@ -276,9 +303,13 @@ class MobileController private constructor(private val context: Context) {
     if (token != generation || mutable.value.sessionId != session.id) return
     mutable.update { it.copy(messages = messages) }
     if (ancillary) {
-      val todos = runCatching { client.todos(session) }.getOrDefault(emptyList())
-      val children = runCatching { client.children(session) }.getOrDefault(emptyList())
-      val changes = runCatching { client.diff(session) }.getOrDefault(emptyList())
+      // Todos, children and diff are independent; fetch in parallel (one round trip when connected).
+      val (todos, children, changes) = coroutineScope {
+        val todosTask = async { runCatching { client.todos(session) }.getOrDefault(emptyList()) }
+        val childrenTask = async { runCatching { client.children(session) }.getOrDefault(emptyList()) }
+        val changesTask = async { runCatching { client.diff(session) }.getOrDefault(emptyList()) }
+        Triple(todosTask.await(), childrenTask.await(), changesTask.await())
+      }
       if (token == generation && mutable.value.sessionId == session.id) mutable.update { it.copy(todos = todos, children = children, changes = changes,
         sessions = (it.sessions + children).distinctBy { item -> item.id }.sortedByDescending { item -> item.updated }) }
     }
