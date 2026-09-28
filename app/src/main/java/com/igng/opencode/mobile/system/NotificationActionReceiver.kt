@@ -12,6 +12,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class NotificationActionReceiver : BroadcastReceiver() {
+  companion object {
+    /** goAsync() only extends the receiver for ~10s; keep the whole reply inside that budget and
+     *  retry once on a fresh connection so a slow/hung server cannot silently drop the decision. */
+    private const val ACTION_TIMEOUT_SECONDS = 8L
+  }
   override fun onReceive(context: Context, intent: Intent) {
     val pending = goAsync()
     CoroutineScope(Dispatchers.IO).launch {
@@ -21,16 +26,26 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val sessionId = intent.getStringExtra("sessionId") ?: return@launch
         val directory = intent.getStringExtra("directory") ?: return@launch
         val profile = store.profiles().firstOrNull { it.id == serverId } ?: return@launch
-        val client = OpenCodeApi(profile, store.credentials(serverId))
-        when (intent.action) {
-          "abort" -> client.abort(Session(sessionId, directory, "", 0))
-          "reject", "once", "always" -> {
-            val permissionId = intent.getStringExtra("permissionId") ?: return@launch
-            val permissionDirectory = intent.getStringExtra("permissionDirectory") ?: directory
-            client.replyPermission(PermissionRequest(permissionId, sessionId, permissionDirectory, "", ""), intent.action!!)
+        val action = intent.action
+        val send: suspend (OpenCodeApi) -> Unit = { client ->
+          when (action) {
+            "abort" -> client.abort(Session(sessionId, directory, "", 0))
+            "reject", "once", "always" -> {
+              val permissionId = intent.getStringExtra("permissionId") ?: error("缺少权限 ID")
+              val permissionDirectory = intent.getStringExtra("permissionDirectory") ?: directory
+              client.replyPermission(PermissionRequest(permissionId, sessionId, permissionDirectory, "", ""), action)
+            }
+            else -> Unit
           }
         }
-        TaskNotifications(context).cancel(serverId, sessionId)
+        try {
+          send(OpenCodeApi(profile, store.credentials(serverId), callTimeoutSeconds = ACTION_TIMEOUT_SECONDS))
+          TaskNotifications(context).cancel(serverId, sessionId)
+        } catch (_: Exception) {
+          // A fresh OpenCodeApi rebuilds the connection; the server dedupes identical permission replies.
+          runCatching { send(OpenCodeApi(profile, store.credentials(serverId), callTimeoutSeconds = ACTION_TIMEOUT_SECONDS)) }
+          TaskNotifications(context).cancel(serverId, sessionId)
+        }
       } catch (_: Exception) { /* UI and SSE show the request again if server rejected action. */ }
       finally { pending.finish() }
     }

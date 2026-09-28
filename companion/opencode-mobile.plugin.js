@@ -4,7 +4,7 @@ export const OpenCodeMobilePlugin = async ({ directory }) => {
   const secret = process.env.OPENCODE_MOBILE_PLUGIN_SECRET
   if (!endpoint || !secret) return {}
   const allowed = new Set([
-    "session.status", "session.idle", "session.error", "permission.asked", "permission.replied",
+    "session.status", "session.idle", "session.error", "session.aborted", "permission.asked", "permission.replied",
     "question.asked", "question.replied", "question.rejected", "permission.rejected", "message.part.updated",
     "permission.v2.asked", "permission.v2.replied", "question.v2.asked", "question.v2.replied", "question.v2.rejected",
   ])

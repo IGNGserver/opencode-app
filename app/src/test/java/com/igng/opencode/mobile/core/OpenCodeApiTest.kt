@@ -168,4 +168,31 @@ class OpenCodeApiTest {
     assertEquals("file.read", v2.properties.getString("permission"))
     assertEquals("ses-1", v2.properties.getString("sessionID"))
   }
+
+  @Test fun encodesSessionIdsExactlyOnceInPath() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"1.0"}"""))
+      server.enqueue(MockResponse().setBody("""[]"""))
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      api.health()
+      api.messages("ses 1/2", "/repo")
+      server.takeRequest()
+      // 'ses 1/2' must be percent-encoded once: %20 for the space and %2F for the slash.
+      assertEquals("/session/ses%201%2F2/message", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  /** The same fixture drives companion/test/server.test.mjs, keeping both task reducers in lockstep. */
+  @Test fun taskReducerMatchesSharedContract() {
+    val fixture = JSONObject(java.io.File("docs/task-event-contract.json").readText())
+    val cases = fixture.getJSONArray("cases")
+    for (index in 0 until cases.length()) {
+      val case = cases.getJSONObject(index)
+      val previous = case.optString("previous").takeIf { it.isNotBlank() }?.let { TaskState("s", TaskPhase.valueOf(it)) }
+      val result = TaskReducer.event("s", case.getJSONObject("kotlin").getString("type"),
+        case.getJSONObject("kotlin").getJSONObject("properties"), previous)
+      assertNotNull("no transition for ${case.getString("name")}", result)
+      assertEquals(case.getString("name"), case.getString("expectedPhase"), result!!.phase.name)
+    }
+  }
 }

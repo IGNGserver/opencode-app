@@ -4,15 +4,19 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { timingSafeEqual } from 'node:crypto'
 
+/** Phases that mean the agent is mid-task; only these may transition to COMPLETED on an idle event. */
+const ACTIVE_PHASES = new Set(['THINKING', 'TOOL', 'SUBAGENT', 'TESTING', 'WAITING_PERMISSION', 'WAITING_QUESTION'])
+
 export function mapEvent(event, previous) {
   const { type, status, tool, partType } = event
   if (type === 'session.status') {
     if (status === 'busy') return { phase: 'THINKING', detail: '正在处理' }
     if (status === 'retry') return { phase: 'THINKING', detail: '正在重试' }
-    if (status === 'idle') return previous?.phase === 'COMPLETED' ? null : { phase: 'COMPLETED', detail: '任务已完成' }
+    if (status === 'idle') return ACTIVE_PHASES.has(previous?.phase) ? { phase: 'COMPLETED', detail: '任务已完成' } : null
   }
-  if (type === 'session.idle') return previous?.phase === 'COMPLETED' ? null : { phase: 'COMPLETED', detail: '任务已完成' }
+  if (type === 'session.idle') return ACTIVE_PHASES.has(previous?.phase) ? { phase: 'COMPLETED', detail: '任务已完成' } : null
   if (type === 'session.error') return { phase: 'FAILED', detail: '执行失败' }
+  if (type === 'session.aborted') return { phase: 'ABORTED', detail: '任务已停止' }
   if (type === 'permission.asked') return { phase: 'WAITING_PERMISSION', detail: '等待权限确认' }
   if (type === 'question.asked') return { phase: 'WAITING_QUESTION', detail: '等待你的回答' }
   if (type === 'permission.replied' || type === 'permission.rejected' || type === 'question.replied' || type === 'question.rejected') return { phase: 'THINKING', detail: '继续执行' }
@@ -28,6 +32,9 @@ export function safeEqual(left, right) {
 }
 
 export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession, serverKey = "" }) {
+  const DEVICE_TTL_MS = 180 * 24 * 60 * 60 * 1000
+  const STATE_TTL_MS = 6 * 60 * 60 * 1000
+  const MAX_STATES = 2000
   const devices = new Map()
   const states = new Map()
   let persist = Promise.resolve()
@@ -36,14 +43,30 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
       const data = JSON.parse(await readFile(registryFile, 'utf8'))
       for (const item of data.devices ?? []) devices.set(`${item.serverKey || item.serverId}:${item.deviceId}`, item)
     } catch (error) { if (error.code !== 'ENOENT') throw error }
+    pruneDevices()
+  }
+  function pruneDevices(now = Date.now()) {
+    for (const [key, device] of devices) if (now - (device.updated ?? 0) > DEVICE_TTL_MS) devices.delete(key)
+  }
+  // Per-session push state is only a de-dup cache; bound it so a long-lived process (or a flood of
+  // distinct session ids) cannot grow the heap without limit.
+  function pruneStates(now = Date.now()) {
+    for (const [key, value] of states) if (now - (value.at ?? 0) > STATE_TTL_MS) states.delete(key)
+    while (states.size > MAX_STATES) states.delete(states.keys().next().value)
   }
   function save() {
-    persist = persist.then(async () => {
+    // A rejected promise must never be chained again: without the leading catch, one disk failure
+    // would permanently stop every future registry write. The trailing catch logs and resolves so a
+    // transient error is retried on the next save instead of failing the caller's registration.
+    persist = persist.catch(() => {}).then(async () => {
+      pruneDevices()
       await mkdir(dirname(registryFile), { recursive: true, mode: 0o700 })
       const temp = `${registryFile}.tmp`
       await writeFile(temp, JSON.stringify({ devices: [...devices.values()] }), { mode: 0o600 })
       await chmod(temp, 0o600)
       await rename(temp, registryFile)
+    }).catch(error => {
+      console.error('companion: failed to persist device registry:', error.message)
     })
     return persist
   }
@@ -87,7 +110,8 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
         const before = states.get(stateKey)
         const next = mapEvent(event, before)
         if (next && (next.phase !== before?.phase || next.detail !== before?.detail)) {
-          states.set(stateKey, next)
+          pruneStates()
+          states.set(stateKey, { ...next, at: Date.now() })
           const session = await fetchSession(event.sessionId, event.directory).catch(() => ({}))
           const payload = {
             sessionId: event.sessionId,
