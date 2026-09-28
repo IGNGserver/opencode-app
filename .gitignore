@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+.idea/
+*.iml
+local.properties
+**/build/
+app/google-services.json
+*.jks
+*.keystore
+node_modules/
+.env
+.env.*
+!.env.example
