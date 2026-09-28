@@ -4,13 +4,16 @@ const TEST_COMMAND = /test|gradle|pytest|vitest|jest/i
 
 /**
  * Maps a tool part to the phase category the notification reducers use. The command itself is never
- * forwarded; only this derived category leaves the host.
+ * forwarded; only this derived category leaves the host. V1 parts carry `tool`, V2 parts carry `name`.
  */
 export function classifyTool(part) {
-  if (part?.tool === 'task') return 'SUBAGENT'
-  if (['bash', 'shell'].includes(part?.tool) && TEST_COMMAND.test(String(part?.state?.input?.command ?? ''))) return 'TESTING'
+  const tool = part?.tool ?? part?.name
+  if (tool === 'task') return 'SUBAGENT'
+  if (['bash', 'shell'].includes(tool) && TEST_COMMAND.test(String(part?.state?.input?.command ?? ''))) return 'TESTING'
   return 'TOOL'
 }
+
+const toolName = part => (part.type === 'tool' ? (part.tool ?? part.name) : undefined)
 
 export const OpenCodeMobilePlugin = async ({ directory }) => {
   const endpoint = process.env.OPENCODE_MOBILE_COMPANION_URL
@@ -44,7 +47,7 @@ export const OpenCodeMobilePlugin = async ({ directory }) => {
         directory,
         serverKey,
         status: properties.status?.type,
-        tool: part.type === "tool" ? part.tool : undefined,
+        tool: toolName(part),
         // Derived here (from the tool name and, for shell tools, the command) so both reducers agree
         // on TESTING/SUBAGENT/TOOL without the companion having to receive private command text.
         toolKind: part.type === "tool" ? classifyTool(part) : undefined,
