@@ -5,9 +5,11 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -26,8 +28,8 @@ import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.core.MobileState
 import com.igng.opencode.mobile.push.PushRegistration
 
-private enum class Page(val label: String) {
-  HOME("首页"), SESSIONS("会话"), CHAT("对话"), SERVERS("服务器"), SETTINGS("设置")
+private enum class RootTab(val label: String) {
+  HOME("工作台"), SESSIONS("会话"), SETTINGS("设置")
 }
 
 class MainActivity : ComponentActivity() {
@@ -40,9 +42,16 @@ class MainActivity : ComponentActivity() {
       val state by controller.state.collectAsState()
       val preferences = remember { getSharedPreferences("ui", MODE_PRIVATE) }
       var dark by remember { mutableStateOf(preferences.getBoolean("dark", false)) }
-      var page by remember { mutableStateOf(if (state.profiles.isEmpty()) Page.SERVERS else Page.HOME) }
+      var currentTab by remember { mutableStateOf(RootTab.HOME) }
+      var inChatDetail by remember { mutableStateOf(false) }
+      var showingServersSheet by remember { mutableStateOf(false) }
       val snackbar = remember { SnackbarHostState() }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+      LaunchedEffect(state.profiles.isEmpty()) {
+        if (state.profiles.isEmpty()) showingServersSheet = true
+      }
+
       LaunchedEffect(state.error) {
         val error = state.error ?: return@LaunchedEffect
         snackbar.showSnackbar(error)
@@ -57,37 +66,107 @@ class MainActivity : ComponentActivity() {
         if (state.serverId != serverId) controller.connect(serverId)
         else if (state.sessions.any { it.id == sessionId }) {
           controller.selectSession(sessionId)
-          page = Page.CHAT
+          inChatDetail = true
           deepLink = null
         }
       }
+
+      // Android back button handling for chat detail screen
+      BackHandler(enabled = inChatDetail) {
+        inChatDetail = false
+      }
+
       FluentTheme(dark) {
         val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-        Scaffold(modifier = Modifier.imePadding(), snackbarHost = { SnackbarHost(snackbar) },
+        Scaffold(
+          modifier = Modifier.imePadding(),
+          snackbarHost = { SnackbarHost(snackbar) },
           bottomBar = {
-            if (state.profiles.isNotEmpty() && !keyboardOpen) NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
-              Page.entries.forEach { item ->
-                NavigationBarItem(selected = page == item, onClick = { page = item },
-                  icon = { FluentNavIcon(item.name, page == item) }, label = { Text(item.label) }, alwaysShowLabel = true)
+            if (!inChatDetail && state.profiles.isNotEmpty() && !keyboardOpen) {
+              NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+                RootTab.entries.forEach { item ->
+                  NavigationBarItem(
+                    selected = currentTab == item,
+                    onClick = { currentTab = item },
+                    icon = { FluentNavIcon(item.name, currentTab == item) },
+                    label = { Text(item.label) },
+                    alwaysShowLabel = true
+                  )
+                }
               }
             }
-          }) { insets ->
+          }
+        ) { insets ->
           Box(Modifier.fillMaxSize().padding(insets)) {
-            when (page) {
-              Page.HOME -> HomeScreen(state, controller, onOpen = { controller.selectSession(it); page = Page.CHAT },
-                onServers = { page = Page.SERVERS }, onSessions = { page = Page.SESSIONS })
-              Page.SESSIONS -> SessionsScreen(state, controller, onOpen = { controller.selectSession(it); page = Page.CHAT })
-              Page.CHAT -> ChatScreen(state, controller, onSessions = { page = Page.SESSIONS })
-              Page.SERVERS -> ServersScreen(state, controller, onConnected = { page = Page.HOME })
-              Page.SETTINGS -> SettingsScreen(state, controller, dark, onDark = {
-                dark = it
-                preferences.edit().putBoolean("dark", it).apply()
-              }, onNotifications = {
-                if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-              })
+            AnimatedContent(
+              targetState = inChatDetail,
+              label = "ChatDetailTransition",
+              transitionSpec = {
+                if (targetState) {
+                  slideInHorizontally { width -> width } + fadeIn() togetherWith
+                      slideOutHorizontally { width -> -width / 3 } + fadeOut()
+                } else {
+                  slideInHorizontally { width -> -width / 3 } + fadeIn() togetherWith
+                      slideOutHorizontally { width -> width } + fadeOut()
+                }
+              }
+            ) { isDetail ->
+              if (isDetail) {
+                ChatScreen(
+                  state = state,
+                  controller = controller,
+                  onBack = { inChatDetail = false }
+                )
+              } else {
+                when (currentTab) {
+                  RootTab.HOME -> HomeScreen(
+                    state = state,
+                    controller = controller,
+                    onOpen = { sessionId ->
+                      controller.selectSession(sessionId)
+                      inChatDetail = true
+                    },
+                    onServers = { showingServersSheet = true },
+                    onSessions = { currentTab = RootTab.SESSIONS }
+                  )
+                  RootTab.SESSIONS -> SessionsScreen(
+                    state = state,
+                    controller = controller,
+                    onOpen = { sessionId ->
+                      controller.selectSession(sessionId)
+                      inChatDetail = true
+                    }
+                  )
+                  RootTab.SETTINGS -> SettingsScreen(
+                    state = state,
+                    controller = controller,
+                    dark = dark,
+                    onDark = {
+                      dark = it
+                      preferences.edit().putBoolean("dark", it).apply()
+                    },
+                    onNotifications = {
+                      if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    },
+                    onManageServers = { showingServersSheet = true }
+                  )
+                }
+              }
             }
             if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
           }
+        }
+
+        if (showingServersSheet) {
+          ServersModal(
+            state = state,
+            controller = controller,
+            onDismiss = { showingServersSheet = false },
+            onConnected = {
+              showingServersSheet = false
+              currentTab = RootTab.HOME
+            }
+          )
         }
       }
     }
@@ -123,19 +202,6 @@ private fun FluentNavIcon(name: String, selected: Boolean) {
           drawCircle(color, 0.8f*u, point(7f, y))
           drawLine(color, point(10f, y), point(17f, y), strokeWidth = 1.8f*u, cap = StrokeCap.Round)
         }
-      }
-      "CHAT" -> {
-        drawRoundRect(color, point(3f, 4f), androidx.compose.ui.geometry.Size(18*u, 14*u), CornerRadius(3*u), style = stroke)
-        val tail = Path().apply { moveTo(8*u, 18*u); lineTo(7*u, 22*u); lineTo(13*u, 18*u) }
-        drawPath(tail, color, style = stroke)
-        drawCircle(color, 0.8f*u, point(8f, 11f)); drawCircle(color, 0.8f*u, point(12f, 11f)); drawCircle(color, 0.8f*u, point(16f, 11f))
-      }
-      "SERVERS" -> {
-        drawRoundRect(color, point(3f, 4f), androidx.compose.ui.geometry.Size(18*u, 7*u), CornerRadius(2*u), style = stroke)
-        drawRoundRect(color, point(3f, 13f), androidx.compose.ui.geometry.Size(18*u, 7*u), CornerRadius(2*u), style = stroke)
-        drawCircle(color, 1*u, point(7f, 7.5f)); drawCircle(color, 1*u, point(7f, 16.5f))
-        drawLine(color, point(11f, 7.5f), point(17f, 7.5f), strokeWidth = 1.5f*u)
-        drawLine(color, point(11f, 16.5f), point(17f, 16.5f), strokeWidth = 1.5f*u)
       }
       "SETTINGS" -> {
         drawCircle(color, 6.5f*u, point(12f, 12f), style = stroke)
