@@ -11,7 +11,9 @@ data class ServerProfile(
   val autoConnect: Boolean = true,
   val notifications: Boolean = true,
   val companionUrl: String = "",
-  val allowCleartext: Boolean = false
+  val allowCleartext: Boolean = false,
+  /** Shared HMAC key used to authenticate companion push messages; not a login credential. */
+  val pluginSecret: String = ""
 )
 
 data class Project(val id: String, val directory: String, val name: String)
@@ -120,21 +122,24 @@ internal fun JSONObject.toSession(): Session = Session(
 internal fun JSONObject.toMessage(): Message {
   val info = obj("info")
   if (info.length() == 0 && str("type").isNotBlank()) return toV2Message()
-  val parts = arr("parts").objects().map { part ->
-    val state = part.obj("state")
-    val type = part.str("type")
-    val files = (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) }
-    val attachments = state.arr("attachments").objects().map { it.str("filename").ifBlank { it.str("url") } }
-    MessagePart(
-      id = part.str("id"), type = type,
-      text = part.str("text").ifBlank { part.str("description").ifBlank { part.str("prompt") } }, tool = part.str("tool"),
-      title = state.str("title"), status = state.str("status"), input = state.valueText("input"),
-      output = state.valueText("output").ifBlank { state.valueText("result") }, path = part.str("filename").ifBlank { part.str("path").ifBlank { part.str("url") } },
-      error = state.errorMessage().ifBlank { part.errorMessage() }, patch = part.str("patch"), files = files, attachments = attachments
-    )
-  }
+  val parts = arr("parts").objects().map { part -> part.toMessagePart() }
   return Message(info.str("id"), info.str("role"), info.longPath("time", "created"), parts,
     info.errorMessage().ifBlank { null })
+}
+
+/** Projects one legacy/V1 `part` object (as delivered in `message.part.updated` and `parts[]`). */
+internal fun JSONObject.toMessagePart(): MessagePart {
+  val state = obj("state")
+  val type = str("type")
+  val files = (0 until arr("files").length()).mapNotNull { index -> arr("files").optString(index).takeIf(String::isNotBlank) }
+  val attachments = state.arr("attachments").objects().map { it.str("filename").ifBlank { it.str("url") } }
+  return MessagePart(
+    id = str("id"), type = type,
+    text = str("text").ifBlank { str("description").ifBlank { str("prompt") } }, tool = str("tool"),
+    title = state.str("title"), status = state.str("status"), input = state.valueText("input"),
+    output = state.valueText("output").ifBlank { state.valueText("result") }, path = str("filename").ifBlank { str("path").ifBlank { str("url") } },
+    error = state.errorMessage().ifBlank { errorMessage() }, patch = str("patch"), files = files, attachments = attachments
+  )
 }
 
 private fun JSONObject.toV2Message(): Message {
@@ -145,26 +150,29 @@ private fun JSONObject.toV2Message(): Message {
     else -> "system"
   }
   val parts = when (type) {
-    "assistant" -> arr("content").objects().map { part ->
-      val state = part.obj("state")
-      val attachments = state.arr("attachments").objects().map { it.str("name").ifBlank { it.str("url") } }
-      val outputPaths = (0 until state.arr("outputPaths").length()).mapNotNull { index ->
-        state.arr("outputPaths").optString(index).takeIf(String::isNotBlank)
-      }
-      MessagePart(
-        id = part.str("id"), type = part.str("type"), text = part.str("text"), tool = part.str("name"),
-        status = state.str("status"), input = state.valueText("input"),
-        output = state.valueText("result").ifBlank { state.valueText("content") },
-        error = state.errorMessage().ifBlank { part.errorMessage() },
-        files = outputPaths, attachments = attachments
-      )
-    }
+    "assistant" -> arr("content").objects().map { part -> part.toV2MessagePart() }
     "shell" -> listOf(MessagePart(str("id"), "tool", text = str("command"), tool = "shell", output = str("output")))
     else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) })
   }
   return Message(
     id = str("id"), role = role, created = longPath("time", "created"), parts = parts,
     error = errorMessage().ifBlank { null }
+  )
+}
+
+/** Projects one V2 `message.part.updated` part object. */
+internal fun JSONObject.toV2MessagePart(): MessagePart {
+  val state = obj("state")
+  val attachments = state.arr("attachments").objects().map { it.str("name").ifBlank { it.str("url") } }
+  val outputPaths = (0 until state.arr("outputPaths").length()).mapNotNull { index ->
+    state.arr("outputPaths").optString(index).takeIf(String::isNotBlank)
+  }
+  return MessagePart(
+    id = str("id"), type = str("type"), text = str("text"), tool = str("name"),
+    status = state.str("status"), input = state.valueText("input"),
+    output = state.valueText("result").ifBlank { state.valueText("content") },
+    error = state.errorMessage().ifBlank { errorMessage() },
+    files = outputPaths, attachments = attachments
   )
 }
 internal fun JSONObject.toPermission(directory: String): PermissionRequest {

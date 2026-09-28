@@ -29,10 +29,18 @@ class ServerStore(context: Context) {
 
   fun profiles(): List<ServerProfile> = try {
     JSONArray(preferences.getString("profiles", "[]")).objects().map {
-      ServerProfile(it.str("id"), it.str("name"), it.str("url"), it.str("username"),
-        it.optBoolean("autoConnect", true), it.optBoolean("notifications", true), it.str("companionUrl"), it.optBoolean("allowCleartext", false))
+      val id = it.str("id")
+      ServerProfile(id, it.str("name"), it.str("url"), it.str("username"),
+        it.optBoolean("autoConnect", true), it.optBoolean("notifications", true), it.str("companionUrl"), it.optBoolean("allowCleartext", false),
+        pluginSecret(id))
     }
-  } catch (_: Exception) { emptyList() }
+  } catch (error: Exception) {
+    Diagnostics.warn("ServerStore", "profiles 解析失败，已忽略全部服务器资料", error)
+    emptyList()
+  }
+
+  /** Shared HMAC key for companion push messages; a symmetric verification key, not a login secret. */
+  fun pluginSecret(id: String): String = preferences.getString("pluginSecret:$id", "") ?: ""
 
   fun selectedId(): String? = preferences.getString("selected", null)
   fun selectedProject(): String? = preferences.getString("selectedProject", null)
@@ -55,7 +63,8 @@ class ServerStore(context: Context) {
           )
         }
       }
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+      Diagnostics.warn("ServerStore", "凭据解密失败，回退到用户名", error)
       ServerCredentials(fallback)
     }
   }
@@ -68,6 +77,7 @@ class ServerStore(context: Context) {
   }
 
   fun save(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null) {
+    if (profile.pluginSecret.isNotBlank()) preferences.edit().putString("pluginSecret:${profile.id}", profile.pluginSecret).apply()
     val updated = profiles().filterNot { it.id == profile.id } + profile
     val json = JSONArray().apply { updated.forEach { item -> put(JSONObject()
       .put("id", item.id).put("name", item.name).put("url", item.url).put("username", item.username)
@@ -109,6 +119,7 @@ class ServerStore(context: Context) {
     } }
     preferences.edit().putString("profiles", json.toString()).apply()
     secrets.edit().remove(id).apply()
+    preferences.edit().remove("pluginSecret:$id").apply()
     if (selectedId() == id) select("", null, null)
   }
 }

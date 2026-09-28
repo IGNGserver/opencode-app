@@ -457,6 +457,7 @@ private fun ServerForm(
   var username by remember(existing?.id) { mutableStateOf(existing?.username ?: "opencode") }
   var password by remember(existing?.id) { mutableStateOf("") }
   var companion by remember(existing?.id) { mutableStateOf(existing?.companionUrl ?: "") }
+  var pluginSecret by remember(existing?.id) { mutableStateOf(existing?.pluginSecret ?: "") }
   var autoConnect by remember(existing?.id) { mutableStateOf(existing?.autoConnect ?: true) }
   var notifications by remember(existing?.id) { mutableStateOf(existing?.notifications ?: true) }
   var allowHttp by remember(existing?.id) { mutableStateOf(existing?.allowCleartext == true) }
@@ -567,6 +568,20 @@ private fun ServerForm(
           singleLine = true
         )
       }
+      item {
+        TextField(
+          value = pluginSecret,
+          onValueChange = { pluginSecret = it },
+          label = { Text("推送校验密钥（OPENCODE_MOBILE_PLUGIN_SECRET）") },
+          visualTransformation = PasswordVisualTransformation(),
+          modifier = Modifier.fillMaxWidth(),
+          singleLine = true
+        )
+      }
+      item {
+        Text("填写与服务器 OPENCODE_MOBILE_PLUGIN_SECRET 相同的密钥，用于校验后台推送、防止伪造通知。留空则不做校验。",
+          style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      }
       item { SwitchRow("自动连接此服务器", autoConnect, { autoConnect = it }) }
       item { SwitchRow("接收任务完成与等待通知", notifications, { notifications = it }) }
       if (normalizedInput.startsWith("http://", true)) {
@@ -595,7 +610,7 @@ private fun ServerForm(
           val normalizedUrl = normalizedInput.trimEnd('/')
           val profile = ServerProfile(
             id, name.trim().ifBlank { "OpenCode" }, normalizedUrl, username.trim().ifBlank { "opencode" }, autoConnect, notifications,
-            companion.trim().trimEnd('/'), allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp
+            companion.trim().trimEnd('/'), allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp, pluginSecret = pluginSecret.trim()
           )
           onSave(profile, password.takeIf { it.isNotBlank() || existing == null }) { message ->
             result = message

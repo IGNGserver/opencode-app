@@ -47,7 +47,6 @@ class MobileController private constructor(private val context: Context) {
       "permission.asked", "question.asked", "permission.replied", "permission.rejected",
       "question.replied", "question.rejected"
     )
-    private val MESSAGE_REFRESH_EVENTS = setOf("message.updated", "message.part.updated")
     @Volatile private var instance: MobileController? = null
     fun get(context: Context): MobileController = instance ?: synchronized(this) {
       instance ?: MobileController(context.applicationContext).also { instance = it }
@@ -243,11 +242,40 @@ class MobileController private constructor(private val context: Context) {
     if (event.type in CATALOG_REFRESH_EVENTS) {
       eventRefresh?.cancel()
       eventRefresh = scope.launch { delay(350); if (generation > 0) reload() }
-    } else if (event.type in MESSAGE_REFRESH_EVENTS && sessionId == mutable.value.sessionId) {
+    } else if (event.type == "message.updated" && sessionId == mutable.value.sessionId) {
+      // A whole message changed; a lightweight transcript refresh is the safest repair.
       val session = mutable.value.session ?: return
       messageRefresh?.cancel()
       messageRefresh = scope.launch { delay(350); loadSession(session, ancillary = false) }
+    } else if (event.type == "message.part.updated" && sessionId == mutable.value.sessionId) {
+      // Streaming emits one of these per delta. Upserting the single part avoids refetching and
+      // re-parsing the entire transcript (and re-encrypting it for the cache) on every chunk.
+      if (!upsertStreamedPart(props)) {
+        val session = mutable.value.session ?: return
+        messageRefresh?.cancel()
+        messageRefresh = scope.launch { delay(350); loadSession(session, ancillary = false) }
+      }
     }
+  }
+
+  /** Applies a single `message.part.updated` payload in place. Returns false when the payload is
+   *  incomplete or targets a message we have not loaded, in which case the caller falls back to a
+   *  full (debounced) transcript refresh. */
+  private fun upsertStreamedPart(props: JSONObject): Boolean {
+    val partJson = props.optJSONObject("part") ?: return false
+    val partId = partJson.str("id")
+    val messageId = props.str("messageID").ifBlank { partJson.str("messageID") }
+    if (partId.isBlank()) return false
+    val projected = if (mutable.value.protocol == ServerProtocol.V2) partJson.toV2MessagePart() else partJson.toMessagePart()
+    val index = mutable.value.messages.indexOfFirst { it.id == messageId }
+    if (index < 0) return false
+    mutable.update { state ->
+      val target = state.messages[index]
+      val partIndex = target.parts.indexOfFirst { it.id == partId }
+      val parts = if (partIndex < 0) target.parts + projected else target.parts.toMutableList().also { it[partIndex] = projected }
+      state.copy(messages = state.messages.toMutableList().also { it[index] = target.copy(parts = parts) })
+    }
+    return true
   }
   private fun notifyAttention(sessionId: String) {
     val current = mutable.value
@@ -323,18 +351,21 @@ class MobileController private constructor(private val context: Context) {
     selectSession(session.id)
   }
   fun send(text: String, accepted: (() -> Unit)? = null) = act {
-    sendMutex.withLock {
-      val session = state.value.session ?: error("先打开会话")
-      if (state.value.tasks[session.id]?.active == true) error("当前会话仍在处理上一项任务")
+    // Only the guard-and-dispatch section is serialized; the follow-up transcript fetch runs outside
+    // the lock so a slow reload cannot block the next send.
+    val session = sendMutex.withLock {
+      val current = state.value.session ?: error("先打开会话")
+      if (state.value.tasks[current.id]?.active == true) error("当前会话仍在处理上一项任务")
       val client = requireNotNull(api)
       val command = if (text.startsWith('/')) state.value.commands.firstOrNull { text.substringAfter('/').substringBefore(' ') == it.name } else null
-      if (command != null) client.command(session, command.name, text.substringAfter(' ', ""), state.value.agent, state.value.model)
-      else client.send(session, text, state.value.agent, state.value.model)
+      if (command != null) client.command(current, command.name, text.substringAfter(' ', ""), state.value.agent, state.value.model)
+      else client.send(current, text, state.value.agent, state.value.model)
       accepted?.invoke()
-      mutable.update { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送"))) }
-      TaskMonitorService.start(context, requireNotNull(state.value.server).id, session.id)
-      loadSession(session, ancillary = false, token = generation)
+      mutable.update { it.copy(tasks = it.tasks + (current.id to TaskState(current.id, TaskPhase.THINKING, "任务已发送"))) }
+      current
     }
+    TaskMonitorService.start(context, requireNotNull(state.value.server).id, session.id)
+    loadSession(session, ancillary = false, token = generation)
   }
   fun abort() = withSession { client, session -> client.abort(session); mutable.update { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止"))) } }
   fun rename(title: String) = withSession { client, session -> client.renameSession(session, title); reload() }
@@ -348,6 +379,16 @@ class MobileController private constructor(private val context: Context) {
   fun replyPermission(request: PermissionRequest, reply: String) = act {
     requireNotNull(api).replyPermission(request, reply)
     mutable.update { it.copy(permissions = it.permissions.filterNot { p -> p.id == request.id }) }
+  }
+  /** Reply to a permission straight from a system notification, keeping in-app state in sync. */
+  fun replyPermission(requestId: String, sessionId: String, directory: String, reply: String) = act {
+    requireNotNull(api).replyPermission(PermissionRequest(requestId, sessionId, directory, "", ""), reply)
+    mutable.update { it.copy(permissions = it.permissions.filterNot { p -> p.id == requestId }) }
+  }
+  /** Abort a session straight from a system notification, keeping in-app state in sync. */
+  fun abortSession(sessionId: String) = act {
+    requireNotNull(api).abort(Session(sessionId, "", "", 0))
+    mutable.update { it.copy(tasks = it.tasks + (sessionId to TaskState(sessionId, TaskPhase.ABORTED, "任务已停止"))) }
   }
   fun replyQuestion(request: QuestionRequest, answers: List<List<String>>) = act {
     requireNotNull(api).replyQuestion(request, answers)

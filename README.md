@@ -32,7 +32,7 @@ ANDROID_HOME=/path/to/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUni
 2. 以非仓库路径配置 `GOOGLE_APPLICATION_CREDENTIALS`、`FIREBASE_PROJECT_ID`、`OPENCODE_SERVER_PASSWORD`、`OPENCODE_MOBILE_PLUGIN_SECRET`、`OPENCODE_MOBILE_SERVER_KEY`；伴随服务和 OpenCode 使用同一组 Basic Auth 配置，默认用户名为 `opencode`，自定义用户名时同时设置 `OPENCODE_SERVER_USERNAME`。两个进程的 `OPENCODE_MOBILE_SERVER_KEY` 都必须设置为 App 中填写的可访问服务器地址。伴随服务默认仅监听 `127.0.0.1:4344`，对手机公开时需放在 HTTPS 反向代理后。
 3. `node companion/src/server.mjs` 启动伴随服务。
 4. 将 `companion/opencode-mobile.plugin.js` 复制到 OpenCode 配置的 `plugins/`，给 OpenCode 进程设置 `OPENCODE_MOBILE_COMPANION_URL`、相同的 `OPENCODE_MOBILE_PLUGIN_SECRET` 和 `OPENCODE_MOBILE_SERVER_KEY`。`OPENCODE_URL` 仍填写伴随服务所在主机访问 OpenCode 的本地地址（默认 `http://127.0.0.1:4096`）。插件仅上报事件类型、会话 ID、目录及工具名称；伴随服务查询会话标题后发送 FCM 数据消息，并按服务器地址隔离设备。
-5. 在 App 服务器资料中填入伴随服务 HTTPS URL，并从设置页注册设备。
+5. 在 App 服务器资料中填入伴随服务 HTTPS URL、相同的 `OPENCODE_MOBILE_PLUGIN_SECRET`（用于校验后台推送、防止伪造通知），并从设置页注册设备。
 
 伴随服务保存设备 ID 和 FCM Token 于 `~/.local/state/opencode-mobile/devices.json`，权限为 0600。请将此状态目录纳入服务器的安全备份。Firebase 服务账号只放在服务器安全目录，不放进仓库或 App。
 
