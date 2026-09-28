@@ -1,0 +1,45 @@
+package com.igng.opencode.mobile.core
+
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+/**
+ * AES/GCM encryption backed by a per-alias AndroidKeyStore key, storing `iv || ciphertext` as Base64.
+ *
+ * Extracted from ServerStore and OfflineCache, which had byte-identical copies of this routine.
+ */
+internal class KeystoreCipher(private val alias: String) {
+  private val key: SecretKey by lazy {
+    val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    (store.getKey(alias, null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
+      init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+        .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
+      generateKey()
+    }
+  }
+
+  fun encrypt(value: String): String {
+    val cipher = Cipher.getInstance(TRANSFORMATION)
+    cipher.init(Cipher.ENCRYPT_MODE, key)
+    return Base64.encodeToString(cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+  }
+
+  fun decrypt(encoded: String): String {
+    val payload = Base64.decode(encoded, Base64.NO_WRAP)
+    val cipher = Cipher.getInstance(TRANSFORMATION)
+    cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, payload.copyOfRange(0, IV_BYTES)))
+    return String(cipher.doFinal(payload.copyOfRange(IV_BYTES, payload.size)), Charsets.UTF_8)
+  }
+
+  private companion object {
+    const val TRANSFORMATION = "AES/GCM/NoPadding"
+    const val IV_BYTES = 12
+    const val TAG_BITS = 128
+  }
+}

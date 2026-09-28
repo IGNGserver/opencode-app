@@ -30,8 +30,17 @@ data class ServerCredentials(
 )
 
 data class ServerEvent(val id: String = "", val directory: String, val type: String, val properties: JSONObject)
-class ApiException(val status: Int, message: String, val responseBody: String = "") : IOException(message)
-enum class ServerProtocol { UNKNOWN, V1, V2 }
+class ApiException(val status: Int, message: String) : IOException(message)
+enum class ServerProtocol {
+  UNKNOWN, V1, V2;
+
+  /** Rename/delete/fork/share session operations exist only on V1. */
+  val supportsSessionActions: Boolean get() = this == V1
+  /** V1 accepts a title when creating a session; V2 derives it. */
+  val supportsTitleOnCreate: Boolean get() = this == V1
+  /** Todo and diff endpoints exist only on V1. */
+  val supportsTodosAndDiff: Boolean get() = this == V1
+}
 
 class OpenCodeApi(
   private val profile: ServerProfile,
@@ -101,7 +110,7 @@ class OpenCodeApi(
     try {
       call.execute().use { response ->
         val responseBody = response.body?.string().orEmpty()
-        if (!response.isSuccessful) throw ApiException(response.code, httpErrorMessage(response.code, responseBody), responseBody)
+        if (!response.isSuccessful) throw ApiException(response.code, httpErrorMessage(response.code, responseBody))
         responseBody
       }
     } finally {
@@ -116,7 +125,7 @@ class OpenCodeApi(
         val responseBody = response.body ?: error("服务器返回空响应")
         if (!response.isSuccessful) {
           val body = responseBody.string()
-          throw ApiException(response.code, httpErrorMessage(response.code, body), body)
+          throw ApiException(response.code, httpErrorMessage(response.code, body))
         }
         responseBody.bytes() to (response.header("Content-Type") ?: "application/octet-stream")
       }
@@ -401,7 +410,7 @@ class OpenCodeApi(
   suspend fun files(directory: String, path: String): List<FileNode> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("file", directory, mapOf("path" to path)).objects().map { it.toNode() }
     ServerProtocol.V2 -> dataArray(obj("api/fs/list", query = locationQuery(directory) + (if (path.isNotBlank()) mapOf("path" to path) else emptyMap())))
-      .objects().map { item -> FileNode(item.str("path"), item.str("type"), item.str("path").substringAfterLast('/'), "", false) }
+      .objects().map { item -> FileNode(item.str("path"), item.str("type"), item.str("path").substringAfterLast('/')) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
   suspend fun fileContent(directory: String, path: String): FileContent = when (ensureProtocol()) {
@@ -409,8 +418,8 @@ class OpenCodeApi(
     ServerProtocol.V2 -> {
       val (bytes, contentType) = requestBytes("GET", "api/fs/read/${encodedPath(path)}", query = locationQuery(directory))
       val binary = !isTextFile(path, contentType)
-      if (binary) FileContent("binary", Base64.encodeToString(bytes, Base64.NO_WRAP), "base64", contentType)
-      else FileContent("text", bytes.toString(Charsets.UTF_8), mimeType = contentType)
+      if (binary) FileContent("binary", Base64.encodeToString(bytes, Base64.NO_WRAP))
+      else FileContent("text", bytes.toString(Charsets.UTF_8))
     }
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }

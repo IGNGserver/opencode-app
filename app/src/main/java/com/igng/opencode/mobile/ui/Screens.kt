@@ -146,7 +146,7 @@ fun HomeScreen(
     item {
       FluentCard(onClick = {
         if (state.connected) {
-          controller.createSession(if (state.protocol == ServerProtocol.V2) "" else "新任务")
+          controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "")
           state.sessionId?.let(onOpen)
         } else {
           onServers()
@@ -278,7 +278,7 @@ fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (St
   Column(Modifier.fillMaxSize()) {
     Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
       PageHeader("PROJECTS & SESSIONS", "会话列表", "新建会话") {
-        if (state.protocol == ServerProtocol.V2) {
+        if (!state.protocol.supportsTitleOnCreate) {
           // V2 协议无需弹窗输入标题，直接一键新建并打开
           controller.createSession("")
         } else {

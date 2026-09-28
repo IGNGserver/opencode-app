@@ -56,15 +56,14 @@ data class QuestionRequest(val id: String, val sessionId: String, val directory:
 data class TodoItem(val content: String, val status: String, val priority: String)
 data class FileChange(
   val path: String,
-  val before: String,
   val after: String,
   val additions: Int,
   val deletions: Int,
   val patch: String = "",
   val status: String = "modified"
 )
-data class FileNode(val path: String, val type: String, val name: String = "", val absolute: String = "", val ignored: Boolean = false)
-data class FileContent(val type: String, val content: String, val encoding: String = "", val mimeType: String = "")
+data class FileNode(val path: String, val type: String, val name: String = "")
+data class FileContent(val type: String, val content: String)
 data class ModelChoice(val providerId: String, val modelId: String, val label: String)
 data class AgentChoice(val name: String, val description: String)
 data class CommandChoice(val name: String, val description: String)
@@ -198,13 +197,13 @@ internal fun JSONObject.toQuestion(directory: String): QuestionRequest = Questio
 )
 internal fun JSONObject.toTodo(): TodoItem = TodoItem(str("content"), str("status"), str("priority"))
 internal fun JSONObject.toChange(): FileChange = FileChange(
-  path = str("file"), before = str("before"), after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
+  path = str("file"), after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
   patch = str("patch"), status = str("status").ifBlank { "modified" }
 )
-internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"), str("name"), str("absolute"), optBoolean("ignored"))
+internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"), str("name"))
 internal fun JSONObject.toFileContent(): FileContent = FileContent(
   str("type").ifBlank { if (str("encoding") == "base64") "binary" else "text" },
-  str("content"), str("encoding"), str("mimeType")
+  str("content")
 )
 
 object TaskReducer {
