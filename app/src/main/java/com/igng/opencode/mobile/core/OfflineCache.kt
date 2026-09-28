@@ -69,7 +69,10 @@ class OfflineCache(context: Context) {
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, payload.copyOfRange(0, 12)))
     String(cipher.doFinal(payload.copyOfRange(12, payload.size)), Charsets.UTF_8)
-  } catch (_: Exception) { null }
+  } catch (error: Exception) {
+    Diagnostics.warn("OfflineCache", "读取 $name 失败", error)
+    null
+  }
   fun saveCatalog(serverId: String, projects: List<Project>, sessions: List<Session>) {
     val data = JSONObject().put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
       .put("sessions", JSONArray().apply { sessions.take(300).forEach { put(JSONObject().put("id", it.id).put("directory", it.directory)
@@ -82,7 +85,10 @@ class OfflineCache(context: Context) {
     val data = JSONObject(raw)
     data.arr("projects").objects().map { Project(it.str("id"), it.str("directory"), it.str("name")) } to
       data.arr("sessions").objects().map { Session(it.str("id"), it.str("directory"), it.str("title"), it.optLong("updated"), it.str("parentId").ifBlank { null }) }
-  } catch (_: Exception) { null }
+  } catch (error: Exception) {
+    Diagnostics.warn("OfflineCache", "catalog 解析失败", error)
+    null
+  }
   }
   fun saveMessages(serverId: String, sessionId: String, messages: List<Message>) {
     val data = JSONArray().apply { messages.takeLast(100).forEach { message ->
@@ -106,7 +112,10 @@ class OfflineCache(context: Context) {
           (0 until part.arr("attachments").length()).mapNotNull { index -> part.arr("attachments").optString(index).takeIf(String::isNotBlank) })
       }, item.str("error").ifBlank { null })
     }
-  } catch (_: Exception) { emptyList() }
+  } catch (error: Exception) {
+    Diagnostics.warn("OfflineCache", "messages 解析失败", error)
+    emptyList()
+  }
   }
   fun delete(serverId: String) {
     synchronized(pendingLock) {

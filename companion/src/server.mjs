@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 
 /** Phases that mean the agent is mid-task; only these may transition to COMPLETED on an idle event. */
 const ACTIVE_PHASES = new Set(['THINKING', 'TOOL', 'SUBAGENT', 'TESTING', 'WAITING_PERMISSION', 'WAITING_QUESTION'])
@@ -29,6 +29,12 @@ export function safeEqual(left, right) {
   const a = Buffer.from(left ?? '')
   const b = Buffer.from(right ?? '')
   return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/** Canonical signed payload; must stay byte-identical to the app's PushMessageVerifier.payload(). */
+export function signPushPayload(pluginSecret, data) {
+  const canonical = ['sessionId', 'serverId', 'phase', 'detail', 'title'].map(key => data[key] ?? '').join('\n')
+  return createHmac('sha256', pluginSecret).update(canonical, 'utf8').digest('base64url')
 }
 
 export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession, serverKey = "" }) {
@@ -121,7 +127,9 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
             detail: next.detail,
           }
           await Promise.allSettled([...devices.values()].filter(device => device.serverKey === event.serverKey).map(async device => {
-            await send(device.token, { ...payload, serverId: device.profileId || device.serverId })
+            const message = { ...payload, serverId: device.profileId || device.serverId }
+            message.sig = signPushPayload(pluginSecret, message)
+            await send(device.token, message)
           }))
         }
         return reply(res, 200, { accepted: true })
@@ -180,8 +188,7 @@ export async function start() {
       const result = await current.json()
       return result.data ?? result
     },
-    send: (token, data) => getMessaging().send({ token, data, android: { priority: data.phase.startsWith('WAITING') || data.phase === 'FAILED' ? 'high' : 'normal' } }),
-  })
+    send: (token, data) => getMessaging().send({ token, data, android: { priority: data.phase.startsWith('WAITING') || data.phase === 'FAILED' ? 'high' : 'normal' } }),  })
   await companion.load()
   const host = process.env.HOST || '127.0.0.1'
   const port = Number(process.env.PORT || 4344)

@@ -1,6 +1,7 @@
 package com.igng.opencode.mobile.core
 
 import kotlinx.coroutines.runBlocking
+import com.igng.opencode.mobile.push.PushMessageVerifier
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -183,8 +184,7 @@ class OpenCodeApiTest {
   }
 
   /** The same fixture drives companion/test/server.test.mjs, keeping both task reducers in lockstep. */
-  @Test fun taskReducerMatchesSharedContract() {
-    val fixture = JSONObject(java.io.File("docs/task-event-contract.json").readText())
+  @Test fun taskReducerMatchesSharedContract() {    val fixture = JSONObject(java.io.File("docs/task-event-contract.json").readText())
     val cases = fixture.getJSONArray("cases")
     for (index in 0 until cases.length()) {
       val case = cases.getJSONObject(index)
@@ -194,5 +194,30 @@ class OpenCodeApiTest {
       assertNotNull("no transition for ${case.getString("name")}", result)
       assertEquals(case.getString("name"), case.getString("expectedPhase"), result!!.phase.name)
     }
+  }
+
+  @Test fun projectsLegacyAndV2MessageParts() {
+    val legacy = JSONObject("""{"id":"part-1","type":"tool","tool":"bash","state":{"status":"completed","title":"跑测试","input":{"command":"gradle test"},"output":"ok","attachments":[{"filename":"a.log"}]}}""").toMessagePart()
+    assertEquals("bash", legacy.tool)
+    assertEquals("completed", legacy.status)
+    assertEquals("跑测试", legacy.title)
+    assertEquals(listOf("a.log"), legacy.attachments)
+    val v2 = JSONObject("""{"id":"part-2","type":"tool","name":"bash","state":{"status":"running","input":{"command":"pwd"},"result":"/repo","outputPaths":["out.txt"]}}""").toV2MessagePart()
+    assertEquals("bash", v2.tool)
+    assertEquals("running", v2.status)
+    assertEquals(listOf("out.txt"), v2.files)
+  }
+
+  @Test fun pushSignatureMatchesCompanionVector() {
+    val data = mapOf(
+      "sessionId" to "ses-1", "serverId" to "srv-1", "phase" to "WAITING_PERMISSION",
+      "detail" to "等待权限确认", "title" to "构建"
+    )
+    // Vector cross-checked against companion signPushPayload('topsecret', ...).
+    assertEquals("yO0ubha7-M4U66aWoIeWbSdk7z0sVsQtcvVZhB-1Who", PushMessageVerifier.sign("topsecret", data))
+    assertTrue(PushMessageVerifier.verify("topsecret", data + ("sig" to PushMessageVerifier.sign("topsecret", data))))
+    assertFalse(PushMessageVerifier.verify("topsecret", data + ("sig" to "wrong")))
+    assertFalse(PushMessageVerifier.verify("topsecret", data))
+    assertTrue(PushMessageVerifier.verify("", data))
   }
 }

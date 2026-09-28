@@ -435,7 +435,10 @@ class OpenCodeApi(
       override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
         try {
           trySend(data.toServerEvent(id.orEmpty()))
-        } catch (_: Exception) { /* Ignore malformed event; next event or refresh repairs state. */ }
+        } catch (error: Exception) {
+          // Ignore malformed event; next event or refresh repairs state. Logged for diagnosis.
+          Diagnostics.warn("SSE", "忽略无法解析的事件", error)
+        }
       }
       override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
         close(t ?: IOException("SSE 已断开：HTTP ${response?.code ?: 0}"))

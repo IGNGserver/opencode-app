@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { createCompanion, mapEvent } from '../src/server.mjs'
+import { createCompanion, mapEvent, signPushPayload } from '../src/server.mjs'
 
 test('mapEvent matches the shared task-event contract', () => {
   const contract = JSON.parse(readFileSync(fileURLToPath(new URL('../../docs/task-event-contract.json', import.meta.url)), 'utf8'))
@@ -14,6 +14,12 @@ test('mapEvent matches the shared task-event contract', () => {
     const phase = next?.phase ?? previous?.phase ?? 'IDLE'
     assert.equal(phase, testCase.expectedPhase, testCase.name)
   }
+})
+
+test('push signature matches the app vector and authenticates delivery', () => {
+  const data = { sessionId: 'ses-1', serverId: 'srv-1', phase: 'WAITING_PERMISSION', detail: '等待权限确认', title: '构建' }
+  // Vector cross-checked against the Android PushMessageVerifier.sign('topsecret', ...).
+  assert.equal(signPushPayload('topsecret', data), 'yO0ubha7-M4U66aWoIeWbSdk7z0sVsQtcvVZhB-1Who')
 })
 
 test('task events become push phases without message content', () => {

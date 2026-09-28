@@ -6,6 +6,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.igng.opencode.mobile.core.ServerCredentials
+import com.igng.opencode.mobile.core.Diagnostics
 import com.igng.opencode.mobile.core.ServerProfile
 import com.igng.opencode.mobile.core.ServerStore
 import com.igng.opencode.mobile.core.Session
@@ -41,7 +42,9 @@ class PushRegistration(private val context: Context) {
     FirebaseMessaging.getInstance().isAutoInitEnabled = true
     FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
       CoroutineScope(Dispatchers.IO).launch {
-        try { register(profile, credentials, token, deviceId) } catch (_: Exception) { }
+        try { register(profile, credentials, token, deviceId) } catch (error: Exception) {
+          Diagnostics.warn("Push", "自动注册设备失败", error)
+        }
       }
     }
   }
@@ -81,7 +84,9 @@ class MobileMessagingService : FirebaseMessagingService() {
       store.profiles().filter { it.notifications && it.companionUrl.isNotBlank() }.forEach { profile ->
         try {
           PushRegistration(this@MobileMessagingService).register(profile, store.credentials(profile.id), token, store.deviceId())
-        } catch (_: Exception) { }
+        } catch (error: Exception) {
+          Diagnostics.warn("Push", "刷新设备 Token 失败", error)
+        }
       }
     }
   }
@@ -89,6 +94,7 @@ class MobileMessagingService : FirebaseMessagingService() {
     val data = message.data
     val profile = ServerStore(this).profiles().firstOrNull { it.id == data["serverId"] } ?: return
     if (!profile.notifications) return
+    if (!PushMessageVerifier.verify(ServerStore(this), profile.id, data)) return
     val sessionId = data["sessionId"] ?: return
     val phase = runCatching { TaskPhase.valueOf(data["phase"] ?: "") }.getOrNull() ?: return
     val session = Session(sessionId, data["directory"].orEmpty(), data["title"].orEmpty().ifBlank { "OpenCode 任务" }, 0)
