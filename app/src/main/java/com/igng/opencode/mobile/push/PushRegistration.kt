@@ -9,6 +9,7 @@ import com.igng.opencode.mobile.core.ServerCredentials
 import com.igng.opencode.mobile.core.ServerProfile
 import com.igng.opencode.mobile.core.ServerStore
 import com.igng.opencode.mobile.core.Session
+import com.igng.opencode.mobile.core.SharedHttp
 import com.igng.opencode.mobile.core.TaskPhase
 import com.igng.opencode.mobile.core.TaskState
 import com.igng.opencode.mobile.system.TaskNotifications
@@ -30,6 +31,8 @@ class PushRegistration(private val context: Context) {
     .connectTimeout(8, TimeUnit.SECONDS)
     .readTimeout(12, TimeUnit.SECONDS)
     .callTimeout(20, TimeUnit.SECONDS)
+    .connectionPool(SharedHttp.connectionPool)
+    .dispatcher(SharedHttp.dispatcher)
     .build()
   fun available(): Boolean = FirebaseApp.getApps(context).isNotEmpty()
   fun enableFor(profile: ServerProfile, password: String, deviceId: String) = enableFor(profile, ServerCredentials(profile.username, password), deviceId)

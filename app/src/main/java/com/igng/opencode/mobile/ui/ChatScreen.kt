@@ -221,9 +221,14 @@ private fun Conversation(state: MobileState, controller: MobileController, modif
   val permissions = state.permissions.filter { it.sessionId == state.sessionId }
   val questions = state.questions.filter { it.sessionId == state.sessionId }
   val total = state.messages.size + permissions.size + questions.size
-  val contentVersion = remember(state.messages) { state.messages.hashCode() }
+  // Cheap content signal: identity, part count and streaming text length of the last message.
+  // Captures new messages and streaming updates in O(1), instead of hashing the whole list each
+  // state emission just to decide whether to auto-scroll.
+  val contentKey = state.messages.lastOrNull()?.let { last ->
+    Triple(last.id, last.parts.size, last.parts.lastOrNull()?.text?.length ?: 0)
+  }
 
-  LaunchedEffect(state.sessionId, total, contentVersion) {
+  LaunchedEffect(state.sessionId, contentKey, total) {
     if (total > 0) list.animateScrollToItem(total - 1)
   }
 
@@ -364,18 +369,20 @@ private fun DiffCodeBlock(diffText: String) {
 private fun MarkdownText(markdown: String) {
   val content = remember(markdown) {
     buildAnnotatedString {
-      markdown.lines().forEachIndexed { index, line ->
+      val lines = markdown.lines()
+      val lastIndex = lines.lastIndex
+      lines.forEachIndexed { index, line ->
         val heading = line.startsWith('#')
         val trimmed = if (heading) line.trimStart('#', ' ') else line
-        val chunks = trimmed.split("**")
         if (heading) {
           withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontSize = 16.sp)) { append(trimmed) }
         } else {
+          val chunks = trimmed.split("**")
           chunks.forEachIndexed { i, chunk ->
             if (i % 2 == 1) withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(chunk) } else append(chunk)
           }
         }
-        if (index != markdown.lines().lastIndex) append('\n')
+        if (index != lastIndex) append('\n')
       }
     }
   }
@@ -499,8 +506,8 @@ private fun Composer(state: MobileState, controller: MobileController) {
   var agentSheet by remember { mutableStateOf(false) }
 
   val task = state.tasks[state.sessionId]
-  val waiting = task?.phase in setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
-  val running = task?.phase in setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING)
+  val waiting = task?.phase in TaskState.WAITING_PHASES
+  val running = task?.phase in TaskState.RUNNING_PHASES
 
   Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp, vertical = 6.dp)) {
     if (!state.connected) {

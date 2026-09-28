@@ -56,8 +56,8 @@ class TaskNotifications(private val context: Context) {
     return PendingIntent.getBroadcast(context, notificationId(profile.id, session.id) xor name.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
   }
   fun build(profile: ServerProfile, session: Session, state: TaskState, permission: PermissionRequest? = null): Notification {
-    val waiting = state.phase in setOf(TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION)
-    val running = state.phase in setOf(TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING)
+    val waiting = state.phase in TaskState.WAITING_PHASES
+    val running = state.phase in TaskState.RUNNING_PHASES
     val channel = if (waiting) ATTENTION else if (running) RUNNING else COMPLETED
     val title = when (state.phase) {
       TaskPhase.COMPLETED -> "已完成 · ${session.title}"
