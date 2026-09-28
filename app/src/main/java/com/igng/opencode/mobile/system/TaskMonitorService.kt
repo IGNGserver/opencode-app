@@ -10,7 +10,6 @@ import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.core.ServerStore
 import com.igng.opencode.mobile.core.Session
 import com.igng.opencode.mobile.core.TaskPhase
-import com.igng.opencode.mobile.core.TaskState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,11 +36,12 @@ class TaskMonitorService : Service() {
     val sessionId = intent.getStringExtra("sessionId") ?: return START_NOT_STICKY
     val profile = ServerStore(this).profiles().firstOrNull { it.id == serverId } ?: return START_NOT_STICKY
     val notifications = TaskNotifications(this)
-    val placeholder = Session(sessionId, "", "OpenCode 任务", 0)
-    val initial = notifications.build(profile, placeholder, TaskState(sessionId, TaskPhase.THINKING, "正在连接任务状态"))
     tracked += serverId to sessionId
-    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, initial, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    else startForeground(FOREGROUND_ID, initial)
+    // A dedicated monitoring notification; kept separate from per-session results so stopping the
+    // foreground state never cancels a real completion/failure notification, and so the foreground
+    // placeholder is not left behind under a session-specific id.
+    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, notifications.buildMonitoring(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    else startForeground(FOREGROUND_ID, notifications.buildMonitoring())
     val controller = MobileController.get(this)
     if (controller.state.value.serverId != serverId) controller.connect(serverId)
     if (monitor == null) {
@@ -51,6 +51,9 @@ class TaskMonitorService : Service() {
         controller.state.collect { state ->
           tracked.toList().forEach { key ->
             val (trackedServerId, trackedSessionId) = key
+            // Only the currently connected server has live updates; tasks on other servers stay
+            // tracked in case the user switches back, but are not fabricated from another server's
+            // state (A09).
             if (trackedServerId != state.serverId) return@forEach
             val trackedProfile = state.profiles.firstOrNull { it.id == trackedServerId } ?: profile
             val session = state.sessions.firstOrNull { it.id == trackedSessionId } ?: Session(trackedSessionId, "", "OpenCode 任务", 0)
@@ -71,7 +74,9 @@ class TaskMonitorService : Service() {
             }
           }
           if (tracked.isEmpty()) {
-            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_DETACH) else @Suppress("DEPRECATION") stopForeground(false)
+            // DETACH would leave the monitoring notification behind; remove it and then stop.
+            // minSdk is 26, so STOP_FOREGROUND_REMOVE is always available.
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
           }
         }

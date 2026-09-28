@@ -50,8 +50,22 @@ jobs:
           cache-dependency-path: companion/package-lock.json
 
       - name: 构建并验证 Android
+        env:
+          OPENCODE_MOBILE_KEYSTORE_FILE: ${{ secrets.OPENCODE_MOBILE_KEYSTORE_FILE }}
+          OPENCODE_MOBILE_KEYSTORE_PASSWORD: ${{ secrets.OPENCODE_MOBILE_KEYSTORE_PASSWORD }}
+          OPENCODE_MOBILE_KEY_ALIAS: ${{ secrets.OPENCODE_MOBILE_KEY_ALIAS }}
+          OPENCODE_MOBILE_KEY_PASSWORD: ${{ secrets.OPENCODE_MOBILE_KEY_PASSWORD }}
         run: |
-          ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleDebug
+          set -euo pipefail
+          # A stable release must be signed with the protected production keystore and be
+          # non-debuggable; a pre-release may fall back to the debug key when secrets are absent.
+          if [[ "$RELEASE_TYPE" == "release" && -z "${OPENCODE_MOBILE_KEYSTORE_FILE:-}" ]]; then
+            echo "正式版发布需要配置 OPENCODE_MOBILE_KEYSTORE_* secrets（稳定签名）" >&2
+            exit 1
+          fi
+          target=:app:assembleDebug
+          if [[ -n "${OPENCODE_MOBILE_KEYSTORE_FILE:-}" ]]; then target=:app:assembleRelease; fi
+          ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest "$target"
 
       - name: 验证 companion
         working-directory: companion
@@ -81,9 +95,38 @@ jobs:
             echo
             echo "## 自动验证"
             echo
-            echo "- Android 单元测试和 Debug APK 构建已由 GitHub Actions 执行。"
+            echo "- Android 单元测试和 APK 构建已由 GitHub Actions 执行。"
             echo "- companion 测试已由 GitHub Actions 执行。"
           } > release-notes.md
+
+      - name: 定位构建产物
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=$(find /tmp/opencode-mobile-gradle -name 'app-release-unsigned.apk' -o -name 'app-release.apk' -o -name 'app-debug.apk' 2>/dev/null | grep -v unsigned | head -n 1)
+          if [[ -z "$apk" || ! -f "$apk" ]]; then
+            echo "APK 不存在" >&2
+            exit 1
+          fi
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: 校验产物（非调试、可安装）
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="${{ steps.apk.outputs.path }}"
+          build_tools=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -n 1)
+          if "$build_tools/aapt2" dump badging "$apk" | grep -q "application-debuggable"; then
+            echo "发布产物不应是 debuggable：$apk" >&2
+            exit 1
+          fi
+          "$build_tools/apksigner" verify --print-certs "$apk" > signing.txt
+          if [[ "$RELEASE_TYPE" == "release" ]] && grep -q "CN=Android Debug" signing.txt; then
+            echo "正式版不能使用调试签名" >&2
+            exit 1
+          fi
+          echo "签名信息：" && cat signing.txt
 
       - name: 发布 GitHub Release
         env:
@@ -91,11 +134,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          apk="/tmp/opencode-mobile-gradle/app/outputs/apk/debug/app-debug.apk"
-          if [[ ! -f "$apk" ]]; then
-            echo "APK 不存在：$apk" >&2
-            exit 1
-          fi
+          apk="${{ steps.apk.outputs.path }}"
           args=("$RELEASE_TAG" "$apk" --title "OpenCode Mobile ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag)
           if [[ "$RELEASE_TYPE" == "pre-release" ]]; then
             args+=(--prerelease)

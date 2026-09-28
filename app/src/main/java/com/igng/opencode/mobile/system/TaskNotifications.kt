@@ -31,6 +31,8 @@ class TaskNotifications(private val context: Context) {
     const val ATTENTION = "task_attention"
     const val COMPLETED = "task_completed"
     fun notificationId(serverId: String, sessionId: String): Int = "${serverId}:$sessionId".hashCode() and 0x7fffffff
+    /** Separate id space for server-pushed notifications so they never cancel an in-app one. */
+    fun pushNotificationId(serverId: String, sessionId: String): Int = "push:$serverId:$sessionId".hashCode() and 0x7fffffff
   }
   init {
     manager.createNotificationChannel(NotificationChannel(RUNNING, "正在运行", NotificationManager.IMPORTANCE_DEFAULT))
@@ -67,9 +69,12 @@ class TaskNotifications(private val context: Context) {
       TaskPhase.WAITING_QUESTION -> "需要回答 · ${session.title}"
       else -> "运行中 · ${session.title}"
     }
+    // When a permission is pending, show what the agent actually wants to run (action + patterns)
+    // instead of the fixed "等待权限确认" so the user can decide knowingly (A16).
+    val body = permission?.let(::permissionSummary) ?: state.detail
     val builder = NotificationCompat.Builder(context, channel)
-      .setSmallIcon(R.drawable.ic_app).setContentTitle(title).setContentText(state.detail)
-      .setStyle(NotificationCompat.BigTextStyle().bigText(state.detail))
+      .setSmallIcon(R.drawable.ic_app).setContentTitle(title).setContentText(body.take(200))
+      .setStyle(NotificationCompat.BigTextStyle().bigText(body))
       .setContentIntent(open(profile.id, session.id)).setAutoCancel(!state.active)
       .setOnlyAlertOnce(running).setOngoing(running)
       .setCategory(if (waiting) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_PROGRESS)
@@ -81,19 +86,41 @@ class TaskNotifications(private val context: Context) {
     if (state.phase == TaskPhase.WAITING_PERMISSION && permission != null) {
       builder.addAction(0, "拒绝", action("reject", profile, session, permission))
       builder.addAction(0, "允许一次", action("once", profile, session, permission))
-      builder.addAction(0, "始终允许", action("always", profile, session, permission))
+      // Label matches the in-app button and the only scope the client can actually assert.
+      builder.addAction(0, "当前会话记住", action("always", profile, session, permission))
     }
     if (state.phase == TaskPhase.WAITING_QUESTION) {
       builder.addAction(0, "回答", open(profile.id, session.id))
     }
     val notification = builder.build()
-    XiaomiIslandAdapter(context).extend(notification, title, state.detail, running)
+    XiaomiIslandAdapter(context).extend(notification, title, body, running)
     return notification
   }
+  private fun permissionSummary(permission: PermissionRequest): String = buildString {
+    append(permission.action.ifBlank { "操作请求" })
+    if (permission.detail.isNotBlank()) append("\n").append(permission.detail.take(600))
+    if (permission.always.isNotEmpty()) append("\n记住规则：").append(permission.always.joinToString(", ").take(200))
+  }
+
+  /** Minimal, persistent notification for the monitoring foreground service (A09). It is separate
+   *  from the per-session result notifications so removing the foreground state never removes a
+   *  real task result. */
+  fun buildMonitoring(): Notification = NotificationCompat.Builder(context, RUNNING)
+    .setSmallIcon(R.drawable.ic_app).setContentTitle("OpenCode 任务监控中").setContentText("正在后台跟踪任务状态")
+    .setOngoing(true).setShowWhen(false).setCategory(NotificationCompat.CATEGORY_SERVICE)
+    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+    .build()
+
   fun show(profile: ServerProfile, session: Session, state: TaskState, permission: PermissionRequest? = null) {
     if (!allowed()) return
+    if (!profile.notifications) return
     if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
     manager.notify(notificationId(profile.id, session.id), build(profile, session, state, permission))
+  }
+  fun showPush(notificationId: Int, profile: ServerProfile, session: Session, state: TaskState) {
+    if (!allowed() || !profile.notifications) return
+    if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
+    manager.notify(notificationId, build(profile, session, state))
   }
   fun cancel(serverId: String, sessionId: String) = manager.cancel(notificationId(serverId, sessionId))
 }

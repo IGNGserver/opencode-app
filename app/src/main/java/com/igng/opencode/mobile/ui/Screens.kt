@@ -32,6 +32,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.igng.opencode.mobile.core.*
 import com.igng.opencode.mobile.push.PushRegistration
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
@@ -120,6 +121,18 @@ fun HomeScreen(
 
     item {
       PageHeader("WORKSPACE", "任务工作台", "刷新", controller::reload)
+      if (state.degraded) {
+        Surface(
+          shape = RoundedCornerShape(8.dp),
+          color = Fluent.amber.copy(alpha = 0.12f),
+          border = BorderStroke(1.dp, Fluent.amber.copy(alpha = 0.4f)),
+          modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+        ) {
+          Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("⚠️ 部分服务器数据本次读取失败，相关状态可能为上一次的已知值。", style = MaterialTheme.typography.bodyMedium, color = Fluent.amber)
+          }
+        }
+      }
       if (state.cached) {
         Surface(
           shape = RoundedCornerShape(8.dp),
@@ -146,8 +159,8 @@ fun HomeScreen(
     item {
       FluentCard(onClick = {
         if (state.connected) {
-          controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "")
-          state.sessionId?.let(onOpen)
+          // Navigate only once the created session is known; do not read the stale sessionId.
+          controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "") { onOpen(it.id) }
         } else {
           onServers()
         }
@@ -280,7 +293,7 @@ fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (St
       PageHeader("PROJECTS & SESSIONS", "会话列表", "新建会话") {
         if (!state.protocol.supportsTitleOnCreate) {
           // V2 协议无需弹窗输入标题，直接一键新建并打开
-          controller.createSession("")
+          controller.createSession("") { onOpen(it.id) }
         } else {
           createDialog = true
         }
@@ -329,7 +342,7 @@ fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (St
       },
       confirmButton = {
         TextButton(shape = RoundedCornerShape(6.dp), onClick = {
-          controller.createSession(newTitle.ifBlank { "新任务" })
+          controller.createSession(newTitle.ifBlank { "新任务" }) { onOpen(it.id) }
           newTitle = ""
           createDialog = false
         }, enabled = state.connected && state.project != null) { Text("创建") }
@@ -374,14 +387,25 @@ fun ServersModal(
               val pair = PairLinkResolver.isPairLink(profile.url)
               val resolved = if (pair) PairLinkResolver.resolve(profile.url) else null
               val actualProfile = if (resolved == null) profile else profile.copy(url = resolved.serverUrl, username = resolved.credentials.username)
+              // Credentials only follow a profile when its address stays on the same origin: reusing
+              // the stored password/Cookie for a different host would send the old secret to a new
+              // target the user merely mistyped. Editing the URL therefore requires re-entering the
+              // password (the form already requires one for an existing profile).
               val savedCredentials = controller.credentials(profile.id)
+              val savedUrl = state.profiles.firstOrNull { it.id == profile.id }?.url
+              val sameOrigin = savedUrl.isNullOrBlank() || runCatching {
+                HttpOrigin.of(requireNotNull(profile.url.trimEnd('/').toHttpUrlOrNull())) ==
+                  HttpOrigin.of(requireNotNull(savedUrl.trimEnd('/').toHttpUrlOrNull()))
+              }.getOrDefault(false)
+              val carryPassword = password ?: savedCredentials.password.takeIf { sameOrigin }
               val credentials = resolved?.credentials ?: ServerCredentials(
                 username = actualProfile.username,
-                password = password ?: savedCredentials.password,
-                cookie = savedCredentials.cookie
+                password = carryPassword.orEmpty(),
+                cookie = if (sameOrigin) savedCredentials.cookie else ""
               )
+              if (resolved == null && carryPassword.isNullOrEmpty()) error("服务器地址已更改，请重新输入访问密码")
               val version = controller.testServer(actualProfile, credentials)
-              if (resolved == null) controller.saveServer(actualProfile, password, credentialUsername = actualProfile.username)
+              if (resolved == null) controller.saveServer(actualProfile, carryPassword, credentialUsername = actualProfile.username)
               else controller.saveServer(actualProfile, resolved.credentials.password, resolved.credentials.cookie, resolved.credentials.username)
               done("已连接 OpenCode $version")
               showForm = false

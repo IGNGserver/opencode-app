@@ -51,11 +51,15 @@
       "kotlin": { "type": "message.part.updated", "properties": { "sessionID": "s", "part": { "type": "tool", "tool": "grep" } } },
       "previous": "THINKING", "expectedPhase": "TOOL" },
     { "name": "bash running a test command is testing",
-      "companion": { "type": "message.part.updated", "partType": "tool", "tool": "test" },
+      "companion": { "type": "message.part.updated", "partType": "tool", "tool": "bash", "toolKind": "TESTING" },
       "kotlin": { "type": "message.part.updated", "properties": { "sessionID": "s", "part": { "type": "tool", "tool": "bash", "state": { "input": { "command": "gradle test" } } } } },
       "previous": "THINKING", "expectedPhase": "TESTING" },
+    { "name": "v2 tool part uses its name as the tool category",
+      "companion": { "type": "message.part.updated", "partType": "tool", "tool": "task", "toolKind": "SUBAGENT" },
+      "kotlin": { "type": "message.part.updated", "properties": { "sessionID": "s", "part": { "type": "tool", "name": "task" } } },
+      "previous": "THINKING", "expectedPhase": "SUBAGENT" },
     { "name": "task tool is a subagent",
-      "companion": { "type": "message.part.updated", "partType": "tool", "tool": "task" },
+      "companion": { "type": "message.part.updated", "partType": "tool", "tool": "task", "toolKind": "SUBAGENT" },
       "kotlin": { "type": "message.part.updated", "properties": { "sessionID": "s", "part": { "type": "tool", "tool": "task" } } },
       "previous": "THINKING", "expectedPhase": "SUBAGENT" }
   ]

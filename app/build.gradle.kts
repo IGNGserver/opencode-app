@@ -5,6 +5,15 @@ plugins {
 }
 if (file("google-services.json").exists()) pluginManager.apply("com.google.gms.google-services")
 
+// Stable release signing is supplied out-of-band so it never lands in source control. When any of
+// the inputs is missing the release build falls back to the debug key, which the release workflow
+// refuses to publish as a *stable* release (A17).
+val releaseKeystorePath: String? = System.getenv("OPENCODE_MOBILE_KEYSTORE_FILE")
+val releaseKeystorePassword: String? = System.getenv("OPENCODE_MOBILE_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = System.getenv("OPENCODE_MOBILE_KEY_ALIAS")
+val releaseKeyPassword: String? = System.getenv("OPENCODE_MOBILE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(releaseKeystorePath, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrBlank() }
+
 android {
   namespace = "com.igng.opencode.mobile"
   compileSdk = 36
@@ -14,6 +23,24 @@ android {
     targetSdk = 36
     versionCode = 3
     versionName = "0.1.0"
+  }
+  if (hasReleaseSigning) {
+    signingConfigs {
+      create("release") {
+        storeFile = file(releaseKeystorePath!!)
+        storePassword = releaseKeystorePassword
+        keyAlias = releaseKeyAlias
+        keyPassword = releaseKeyPassword
+      }
+    }
+  }
+  buildTypes {
+    release {
+      // A distributable build must never be debuggable; keep the debug key as a non-publishable
+      // fallback so local `assembleRelease` still works without the production keystore.
+      isDebuggable = false
+      signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+    }
   }
   buildFeatures { compose = true }
   compileOptions {

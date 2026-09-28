@@ -5,23 +5,28 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
-import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 data class ServerCredentials(
   val username: String = "opencode",
@@ -52,17 +57,34 @@ class OpenCodeApi(
   constructor(profile: ServerProfile, password: String) : this(profile, ServerCredentials(profile.username, password))
 
   private val base: HttpUrl = requireNotNull(profile.url.trimEnd('/').toHttpUrlOrNull()) { "服务器地址无效" }
+  private val origin = HttpOrigin.of(base)
   private val client = OkHttpClient.Builder()
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(25, TimeUnit.SECONDS)
     .callTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
     .connectionPool(SharedHttp.connectionPool)
     .dispatcher(SharedHttp.dispatcher)
+    // Never let OkHttp's default redirect policy replay an authenticated request to a different
+    // scheme/host/port: a trusted server (or its proxy) could otherwise reflect the Authorization
+    // header or the raw Cookie onto a downgraded or unrelated origin before we ever check the final
+    // URL. The companion client below is the only one allowed to follow redirects, and it enforces
+    // this bound itself.
+    .followRedirects(false)
+    .followSslRedirects(false)
+    .addInterceptor { chain ->
+      // Defence in depth: even if the redirect policy is ever changed, no authenticated request can
+      // leave the configured origin.
+      val request = chain.request()
+      if (HttpOrigin.of(request.url) != origin) throw IOException("拒绝向非授权地址发送凭据")
+      chain.proceed(request)
+    }
     .build()
   private val streamClient = client.newBuilder()
     .readTimeout(0, TimeUnit.MILLISECONDS)
     .callTimeout(0, TimeUnit.MILLISECONDS)
     .build()
+  /** Dedicated scope for blocking HTTP work so a cancelled caller never waits on the socket. */
+  private val ioScope = SharedHttp.ioScope
   @Volatile private var protocol = ServerProtocol.UNKNOWN
 
   init {
@@ -88,6 +110,13 @@ class OpenCodeApi(
     return builder
   }
 
+  /** Every request this client builds targets [origin]; the redirect policy forbids OkHttp from
+   *  moving an authenticated request elsewhere, so the credentials can only ever reach [origin]. */
+  private fun requireOrigin(request: Request) {
+    val url = request.url
+    require(HttpOrigin.of(url) == origin) { "拒绝向非授权地址发送凭据" }
+  }
+
   private fun httpErrorMessage(status: Int, body: String): String {
     val serverMessage = runCatching {
       val json = JSONObject(body)
@@ -103,39 +132,68 @@ class OpenCodeApi(
     }
   }
 
-  private suspend fun request(method: String, path: String, directory: String? = null, query: Map<String, String> = emptyMap(), body: JSONObject? = null): String = withContext(Dispatchers.IO) {
+  private suspend fun request(method: String, path: String, directory: String? = null, query: Map<String, String> = emptyMap(), body: JSONObject? = null): String {
     val mediaType = "application/json; charset=utf-8".toMediaType()
-    val payload = if (method == "GET" || method == "DELETE") null else (body?.toString() ?: "{}").toRequestBody(mediaType)
-    val call = client.newCall(requestBuilder(path, directory, query).method(method, payload).build())
-    try {
-      call.execute().use { response ->
-        val responseBody = response.body?.string().orEmpty()
-        if (!response.isSuccessful) throw ApiException(response.code, httpErrorMessage(response.code, responseBody))
-        responseBody
-      }
-    } finally {
-      if (!kotlin.coroutines.coroutineContext.isActive) call.cancel()
+    return runCall(requestBuilder(path, directory, query).method(method, if (method == "GET" || method == "DELETE") null else (body?.toString() ?: "{}").toRequestBody(mediaType)).build()) { response ->
+      val responseBody = response.body?.readText(MAX_RESPONSE_CHARS).orEmpty()
+      if (!response.isSuccessful) throw ApiException(response.code, httpErrorMessage(response.code, responseBody))
+      responseBody
     }
   }
 
-  private suspend fun requestBytes(method: String, path: String, directory: String? = null, query: Map<String, String> = emptyMap()): Pair<ByteArray, String> = withContext(Dispatchers.IO) {
-    val call = client.newCall(requestBuilder(path, directory, query).method(method, null).build())
-    try {
-      call.execute().use { response ->
-        val responseBody = response.body ?: error("服务器返回空响应")
-        if (!response.isSuccessful) {
-          val body = responseBody.string()
-          throw ApiException(response.code, httpErrorMessage(response.code, body))
+  private suspend fun requestBytes(method: String, path: String, directory: String? = null, query: Map<String, String> = emptyMap()): Pair<ByteArray, String> =
+    runCall(requestBuilder(path, directory, query).method(method, null).build()) { response ->
+      val responseBody = response.body ?: error("服务器返回空响应")
+      if (!response.isSuccessful) {
+        val body = responseBody.readText(MAX_RESPONSE_CHARS)
+        throw ApiException(response.code, httpErrorMessage(response.code, body))
+      }
+      responseBody.bytes(MAX_FILE_BYTES) to (response.header("Content-Type") ?: "application/octet-stream")
+    }
+
+  /**
+   * Runs the blocking call and its body read on a background worker, but cancels the underlying
+   * socket the moment the caller's coroutine is cancelled. Cancellation must not wait for the server
+   * to answer a request the user already navigated away from (A15): the coroutine returns
+   * immediately while [call] is aborted and the abandoned worker unwinds on its own.
+   */
+  private suspend fun <T> runCall(request: Request, read: (Response) -> T): T {
+    requireOrigin(request)
+    return suspendCancellableCoroutine { continuation ->
+      val call = client.newCall(request)
+      val worker = ioScope.launch {
+        try {
+          continuation.resume(call.execute().use(read))
+        } catch (error: Throwable) {
+          continuation.resumeWith(Result.failure(error))
         }
-        responseBody.bytes() to (response.header("Content-Type") ?: "application/octet-stream")
       }
-    } finally {
-      if (!kotlin.coroutines.coroutineContext.isActive) call.cancel()
+      continuation.invokeOnCancellation {
+        call.cancel()
+        worker.cancel()
+      }
     }
   }
 
-  private suspend fun obj(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONObject = JSONObject(request("GET", path, directory, query))
-  private suspend fun arr(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONArray = JSONArray(request("GET", path, directory, query))
+  private fun ResponseBody.readText(limit: Int): String {
+    val source = source()
+    return if (source.request(limit.toLong())) {
+      throw IOException("服务器响应过大（超过 $limit 字节），已拒绝读取")
+    } else source.readString(contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8)
+  }
+
+  private fun ResponseBody.bytes(limit: Long): ByteArray {
+    val source = source()
+    if (source.request(limit + 1)) throw IOException("文件过大（超过 $limit 字节），已拒绝下载")
+    return bytes()
+  }
+
+  // Parsing runs on the IO dispatcher: JSONObject/JSONArray construction of a large transcript is
+  // CPU-bound and the controller calls these from its Main-immediate scope (A15).
+  private suspend fun obj(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONObject =
+    withContext(Dispatchers.IO) { JSONObject(request("GET", path, directory, query)) }
+  private suspend fun arr(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONArray =
+    withContext(Dispatchers.IO) { JSONArray(request("GET", path, directory, query)) }
   private fun dataObject(value: JSONObject): JSONObject = value.optJSONObject("data") ?: value
   private fun dataArray(value: JSONObject): JSONArray = value.optJSONArray("data") ?: JSONArray()
   private suspend fun dataObjects(
@@ -146,7 +204,11 @@ class OpenCodeApi(
     val result = mutableListOf<JSONObject>()
     val seen = mutableSetOf<String>()
     var cursor: String? = null
+    // A misbehaving server could hand out a fresh cursor forever; bound both the page count and the
+    // total items so one listing cannot exhaust memory or spin indefinitely (A15).
+    var pages = 0
     do {
+      if (pages++ >= MAX_PAGES) break
       val pageQuery = query.toMutableMap().apply {
         if (cursor != null) {
           put("cursor", cursor!!)
@@ -155,6 +217,10 @@ class OpenCodeApi(
       }
       val page = obj(path, query = pageQuery)
       result += page.optJSONArray("data")?.objects().orEmpty()
+      if (result.size >= MAX_PAGE_ITEMS) {
+        Diagnostics.warn("OpenCodeApi", "分页结果超过 $MAX_PAGE_ITEMS 条，已截断 $path")
+        break
+      }
       val next = page.obj("cursor").str("next").takeIf { it.isNotBlank() }
       cursor = next?.takeIf(seen::add)
     } while (cursor != null)
@@ -410,7 +476,7 @@ class OpenCodeApi(
   suspend fun files(directory: String, path: String): List<FileNode> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("file", directory, mapOf("path" to path)).objects().map { it.toNode() }
     ServerProtocol.V2 -> dataArray(obj("api/fs/list", query = locationQuery(directory) + (if (path.isNotBlank()) mapOf("path" to path) else emptyMap())))
-      .objects().map { item -> FileNode(item.str("path"), item.str("type"), item.str("path").substringAfterLast('/')) }
+      .objects().map { item -> FileNode(item.str("path"), item.str("type")) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
   suspend fun fileContent(directory: String, path: String): FileContent = when (ensureProtocol()) {
@@ -440,10 +506,19 @@ class OpenCodeApi(
     val builder = requestBuilder(path, null, emptyMap()).header("Accept", "text/event-stream")
     if (!lastEventId.isNullOrBlank()) builder.header("Last-Event-ID", lastEventId)
     val request = builder.build()
+    requireOrigin(request)
     val source: EventSource = EventSources.createFactory(streamClient).newEventSource(request, object : EventSourceListener() {
       override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
         try {
-          trySend(data.toServerEvent(id.orEmpty()))
+          val event = data.toServerEvent(id.orEmpty())
+          // A full/closed buffer must not silently drop an event: the dropped event could be the very
+          // permission or terminal state the UI is waiting for. Surface it as a stream failure so the
+          // controller reconnects and runs a full reconciliation instead of trusting a partial view.
+          val delivered = trySend(event)
+          if (delivered.isFailure) {
+            Diagnostics.warn("SSE", "事件积压，触发重新同步", delivered.exceptionOrNull())
+            close(IOException("SSE 事件积压，已触发全量对账"))
+          }
         } catch (error: Exception) {
           // Ignore malformed event; next event or refresh repairs state. Logged for diagnosis.
           Diagnostics.warn("SSE", "忽略无法解析的事件", error)
@@ -471,6 +546,10 @@ class OpenCodeApi(
   }
 
   private companion object {
+    const val MAX_RESPONSE_CHARS = 8_000_000
+    const val MAX_FILE_BYTES = 8_000_000L
+    const val MAX_PAGES = 40
+    const val MAX_PAGE_ITEMS = 5_000
     val TEXT_MIME_TYPES = setOf("application/json", "application/xml", "application/javascript", "application/x-javascript")
     val TEXT_FILE_NAMES = setOf("dockerfile", "makefile", "license", "readme", "changelog", ".gitignore", ".gitattributes", ".env")
     val TEXT_EXTENSIONS = setOf(

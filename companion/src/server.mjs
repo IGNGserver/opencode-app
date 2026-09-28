@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto'
 
 /** Phases that mean the agent is mid-task; only these may transition to COMPLETED on an idle event. */
 const ACTIVE_PHASES = new Set(['THINKING', 'TOOL', 'SUBAGENT', 'TESTING', 'WAITING_PERMISSION', 'WAITING_QUESTION'])
@@ -21,7 +21,12 @@ export function mapEvent(event, previous) {
   if (type === 'question.asked') return { phase: 'WAITING_QUESTION', detail: '等待你的回答' }
   if (type === 'permission.replied' || type === 'permission.rejected' || type === 'question.replied' || type === 'question.rejected') return { phase: 'THINKING', detail: '继续执行' }
   if (type === 'message.part.updated' && partType === 'reasoning') return { phase: 'THINKING', detail: '正在思考' }
-  if (type === 'message.part.updated' && partType === 'tool') return { phase: /test|gradle|pytest|vitest|jest/i.test(tool ?? '') ? 'TESTING' : tool === 'task' ? 'SUBAGENT' : 'TOOL', detail: `正在运行 ${String(tool || '工具').slice(0, 40)}` }
+  if (type === 'message.part.updated' && partType === 'tool') {
+    const kind = ['TESTING', 'SUBAGENT', 'TOOL'].includes(event.toolKind)
+      ? event.toolKind
+      : /test|gradle|pytest|vitest|jest/i.test(tool ?? '') ? 'TESTING' : tool === 'task' ? 'SUBAGENT' : 'TOOL'
+    return { phase: kind, detail: `正在运行 ${String(tool || '工具').slice(0, 40)}` }
+  }
   return null
 }
 
@@ -31,28 +36,61 @@ export function safeEqual(left, right) {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-/** Canonical signed payload; must stay byte-identical to the app's PushMessageVerifier.payload(). */
+/**
+ * Canonical signed payload (v2), byte-identical to the app's PushMessageVerifier.payloadV2().
+ *
+ * Length-prefixing each field removes the field-boundary ambiguity of newline joining (e.g. a `\n`
+ * inside `detail` must not be able to imitate a boundary into `title`), and `directory`/`deviceId`
+ * are signed so they cannot be rewritten in transit.
+ */
+export const SIGNED_FIELDS_V2 = ['version', 'sessionId', 'serverId', 'directory', 'phase', 'detail', 'title', 'deviceId', 'ts']
 export function signPushPayload(pluginSecret, data) {
+  const fields = SIGNED_FIELDS_V2.map(key => String(data[key] ?? ''))
+  const canonical = '2|' + fields.map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('|')
+  return createHmac('sha256', pluginSecret).update(canonical, 'utf8').digest('base64url')
+}
+
+/** Legacy v1 payload, still accepted during migration. */
+export function signPushPayloadV1(pluginSecret, data) {
   const canonical = ['sessionId', 'serverId', 'phase', 'detail', 'title'].map(key => data[key] ?? '').join('\n')
   return createHmac('sha256', pluginSecret).update(canonical, 'utf8').digest('base64url')
 }
 
-export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession, serverKey = "" }) {
-  const DEVICE_TTL_MS = 180 * 24 * 60 * 60 * 1000
+const DEVICE_TTL_MS = 180 * 24 * 60 * 60 * 1000
+
+export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession, serverKey = "", outboxFile = registryFile + '.outbox', retryDelayMs = 5_000 }) {
   const STATE_TTL_MS = 6 * 60 * 60 * 1000
   const MAX_STATES = 2000
+  const MAX_OUTBOX = 500
+  const MAX_SEND_ATTEMPTS = 6
   const devices = new Map()
   const states = new Map()
+  // Durable delivery queue. A state update is only recorded as delivered once the device send has
+  // been accepted; failures stay queued and are retried, so a transient FCM error cannot silently
+  // drop the only completion notification (A06).
+  const outbox = []
+  // Per-session serial queue: concurrent events for one session are reduced and delivered in order.
+  const sessionQueues = new Map()
   let persist = Promise.resolve()
+  let outboxPersist = Promise.resolve()
+  let timer = null
+
   async function load() {
     try {
       const data = JSON.parse(await readFile(registryFile, 'utf8'))
       for (const item of data.devices ?? []) devices.set(`${item.serverKey || item.serverId}:${item.deviceId}`, item)
     } catch (error) { if (error.code !== 'ENOENT') throw error }
+    try {
+      const data = JSON.parse(await readFile(outboxFile, 'utf8'))
+      for (const item of data.pending ?? []) outbox.push(item)
+    } catch (error) { if (error.code !== 'ENOENT') throw error }
     pruneDevices()
   }
   function pruneDevices(now = Date.now()) {
     for (const [key, device] of devices) if (now - (device.updated ?? 0) > DEVICE_TTL_MS) devices.delete(key)
+  }
+  function isExpired(device, now = Date.now()) {
+    return now - (device.updated ?? 0) > DEVICE_TTL_MS
   }
   // Per-session push state is only a de-dup cache; bound it so a long-lived process (or a flood of
   // distinct session ids) cannot grow the heap without limit.
@@ -60,21 +98,97 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
     for (const [key, value] of states) if (now - (value.at ?? 0) > STATE_TTL_MS) states.delete(key)
     while (states.size > MAX_STATES) states.delete(states.keys().next().value)
   }
+  async function writeRegistry() {
+    pruneDevices()
+    await mkdir(dirname(registryFile), { recursive: true, mode: 0o700 })
+    const temp = `${registryFile}.tmp`
+    await writeFile(temp, JSON.stringify({ devices: [...devices.values()] }), { mode: 0o600 })
+    await chmod(temp, 0o600)
+    await rename(temp, registryFile)
+  }
+  /** Persists the device registry. A rejected promise must never be chained again; the leading catch
+   *  ensures one disk failure does not permanently stop future writes. */
   function save() {
-    // A rejected promise must never be chained again: without the leading catch, one disk failure
-    // would permanently stop every future registry write. The trailing catch logs and resolves so a
-    // transient error is retried on the next save instead of failing the caller's registration.
-    persist = persist.catch(() => {}).then(async () => {
-      pruneDevices()
-      await mkdir(dirname(registryFile), { recursive: true, mode: 0o700 })
-      const temp = `${registryFile}.tmp`
-      await writeFile(temp, JSON.stringify({ devices: [...devices.values()] }), { mode: 0o600 })
-      await chmod(temp, 0o600)
-      await rename(temp, registryFile)
-    }).catch(error => {
+    persist = persist.catch(() => {}).then(writeRegistry).catch(error => {
       console.error('companion: failed to persist device registry:', error.message)
     })
     return persist
+  }
+  /** Same, but the caller must know whether the registry is durable (A08). */
+  async function saveStrict() {
+    persist = persist.catch(() => {}).then(writeRegistry)
+    return persist
+  }
+  function saveOutbox() {
+    outboxPersist = outboxPersist.catch(() => {}).then(async () => {
+      await mkdir(dirname(outboxFile), { recursive: true, mode: 0o700 })
+      const temp = `${outboxFile}.tmp`
+      await writeFile(temp, JSON.stringify({ pending: outbox.slice(-MAX_OUTBOX) }), { mode: 0o600 })
+      await chmod(temp, 0o600)
+      await rename(temp, outboxFile)
+    }).catch(error => {
+      console.error('companion: failed to persist push outbox:', error.message)
+    })
+    return outboxPersist
+  }
+  function enqueue(delivery) {
+    if (outbox.length >= MAX_OUTBOX) outbox.shift()
+    outbox.push(delivery)
+    saveOutbox()
+  }
+  /** Delivers one queued item, retrying with backoff; invalid tokens are dropped. */
+  async function deliver(item) {
+    const device = [...devices.values()].find(candidate => candidate.token === item.token)
+    if (device && isExpired(device)) {
+      console.error('companion: dropping push to expired device', device.deviceId)
+      return true
+    }
+    try {
+      await send(item.token, item.payload)
+      return true
+    } catch (error) {
+      const code = error?.errorInfo?.code || error?.code
+      if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token' || code === 'messaging/invalid-argument') {
+        console.error('companion: removing invalid FCM token for a device')
+        for (const [key, candidate] of devices) if (candidate.token === item.token) devices.delete(key)
+        save()
+        return true
+      }
+      item.attempts = (item.attempts ?? 0) + 1
+      item.lastError = String(error?.message ?? error).slice(0, 200)
+      return item.attempts >= MAX_SEND_ATTEMPTS
+    }
+  }
+  async function drainOutbox() {
+    if (drainOutbox.running) return
+    drainOutbox.running = true
+    try {
+      for (let index = outbox.length - 1; index >= 0; index--) {
+        const item = outbox[index]
+        if ((item.nextAttemptAt ?? 0) > Date.now()) continue
+        // eslint-disable-next-line no-await-in-loop
+        const done = await deliver(item)
+        if (done) outbox.splice(index, 1)
+        else item.nextAttemptAt = Date.now() + Math.min(retryDelayMs * 2 ** item.attempts, 10 * 60_000)
+      }
+      if (outbox.length > 0) {
+        timer = setTimeout(() => { timer = null; drainOutbox().catch(() => {}) }, retryDelayMs)
+        if (timer.unref) timer.unref()
+      }
+      await saveOutbox()
+    } finally {
+      drainOutbox.running = false
+    }
+  }
+  /** Serializes handling of one session so concurrent events reduce and deliver in a stable order. */
+  function withSessionQueue(key, task) {
+    const previous = sessionQueues.get(key) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(task).catch(error => {
+      console.error('companion: session delivery failed:', error.message)
+    })
+    sessionQueues.set(key, next)
+    next.finally(() => { if (sessionQueues.get(key) === next) sessionQueues.delete(key) })
+    return next
   }
   async function body(req) {
     let text = ''
@@ -104,8 +218,23 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
           token: input.token,
           updated: Date.now(),
         })
-        await save()
+        // A registration that cannot be persisted is not durable; report a retryable failure instead
+        // of a false success that would vanish on restart (A08).
+        try { await saveStrict() } catch (error) {
+          console.error('companion: registration could not be persisted:', error.message)
+          return reply(res, 503, { error: 'registry unavailable' })
+        }
         return reply(res, 200, { registered: true })
+      }
+      if (req.method === 'POST' && path === '/v1/devices/unregister') {
+        if (!await verifyDevice(req.headers.authorization, req.headers.cookie)) return reply(res, 401, { error: 'unauthorized' })
+        const input = await body(req)
+        if (typeof input.deviceId !== 'string' || typeof input.serverKey !== 'string') return reply(res, 400, { error: 'invalid device' })
+        for (const [key, device] of devices) {
+          if (device.deviceId === input.deviceId && device.serverKey === input.serverKey) devices.delete(key)
+        }
+        save()
+        return reply(res, 200, { unregistered: true })
       }
       if (req.method === 'POST' && path === '/v1/events') {
         if (!safeEqual(req.headers['x-opencode-mobile-secret'], pluginSecret)) return reply(res, 401, { error: 'unauthorized' })
@@ -113,33 +242,43 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
         if (typeof event.sessionId !== 'string' || event.sessionId.length > 256 || !event.sessionId || typeof event.type !== 'string' || typeof event.serverKey !== 'string' || !event.serverKey) return reply(res, 400, { error: 'invalid event' })
         if (serverKey && event.serverKey !== serverKey) return reply(res, 403, { error: 'wrong server' })
         const stateKey = `${event.serverKey}:${event.sessionId}`
-        const before = states.get(stateKey)
-        const next = mapEvent(event, before)
-        if (next && (next.phase !== before?.phase || next.detail !== before?.detail)) {
+        await withSessionQueue(stateKey, async () => {
           pruneStates()
+          const before = states.get(stateKey)
+          const next = mapEvent(event, before)
+          if (!next || (next.phase === before?.phase && next.detail === before?.detail)) return
+          // Record the accepted state before delivery so re-delivery of the same event is de-duped,
+          // but only for events we are actually going to attempt (A06).
           states.set(stateKey, { ...next, at: Date.now() })
           const session = await fetchSession(event.sessionId, event.directory).catch(() => ({}))
-          const payload = {
-            sessionId: event.sessionId,
-            directory: String(event.directory ?? '').slice(0, 500),
-            title: String(session.title ?? 'OpenCode 任务').slice(0, 80),
-            phase: next.phase,
-            detail: next.detail,
+          const deviceIds = [...devices.values()].filter(device => device.serverKey === event.serverKey)
+          for (const device of deviceIds) {
+            if (isExpired(device)) continue
+            const payload = {
+              version: 2,
+              sessionId: event.sessionId,
+              serverId: device.profileId || device.serverId,
+              directory: String(event.directory ?? '').slice(0, 500),
+              title: String(session.title ?? 'OpenCode 任务').slice(0, 80),
+              phase: next.phase,
+              detail: next.detail,
+              deviceId: device.deviceId,
+              ts: String(Date.now()),
+            }
+            payload.sig = signPushPayload(pluginSecret, payload)
+            enqueue({ id: randomUUID(), token: device.token, payload, attempts: 0 })
           }
-          await Promise.allSettled([...devices.values()].filter(device => device.serverKey === event.serverKey).map(async device => {
-            const message = { ...payload, serverId: device.profileId || device.serverId }
-            message.sig = signPushPayload(pluginSecret, message)
-            await send(device.token, message)
-          }))
-        }
-        return reply(res, 200, { accepted: true })
+          if (deviceIds.length > 0) drainOutbox()
+        })
+        // 202: the event is accepted and will be delivered; it is not a promise of device receipt.
+        return reply(res, 202, { accepted: true })
       }
       reply(res, 404, { error: 'not found' })
     } catch (error) {
       reply(res, error?.message === 'request too large' ? 413 : 400, { error: 'invalid request' })
     }
   }
-  return { load, handle, devices, states }
+  return { load, handle, devices, states, outbox, drainOutbox }
 }
 
 export async function start() {
@@ -188,7 +327,8 @@ export async function start() {
       const result = await current.json()
       return result.data ?? result
     },
-    send: (token, data) => getMessaging().send({ token, data, android: { priority: data.phase.startsWith('WAITING') || data.phase === 'FAILED' ? 'high' : 'normal' } }),  })
+    send: (token, data) => getMessaging().send({ token, data, android: { priority: data.phase.startsWith('WAITING') || data.phase === 'FAILED' ? 'high' : 'normal' } }),
+  })
   await companion.load()
   const host = process.env.HOST || '127.0.0.1'
   const port = Number(process.env.PORT || 4344)

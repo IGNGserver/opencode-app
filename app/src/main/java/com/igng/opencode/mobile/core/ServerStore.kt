@@ -22,8 +22,18 @@ class ServerStore(context: Context) {
     emptyList()
   }
 
-  /** Shared HMAC key for companion push messages; a symmetric verification key, not a login secret. */
-  fun pluginSecret(id: String): String = preferences.getString("pluginSecret:$id", "") ?: ""
+  /** Shared HMAC key for companion push messages; a symmetric verification key, not a login secret.
+   *  Stored Keystore-encrypted at rest, with a transparent read of the legacy plaintext value (A07). */
+  fun pluginSecret(id: String): String {
+    val stored = preferences.getString("pluginSecret:$id", "") ?: ""
+    if (stored.isBlank()) return ""
+    val decrypted = runCatching { key.decrypt(stored) }.getOrNull()
+    if (decrypted != null) return decrypted
+    // Legacy installs stored the key in cleartext; adopt it and rewrite encrypted.
+    if (stored.startsWith("{")) return ""
+    runCatching { preferences.edit().putString("pluginSecret:$id", key.encrypt(stored)).apply() }
+    return stored
+  }
 
   fun selectedId(): String? = preferences.getString("selected", null)
   fun selectedProject(): String? = preferences.getString("selectedProject", null)
@@ -60,7 +70,11 @@ class ServerStore(context: Context) {
   }
 
   fun save(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null) {
-    if (profile.pluginSecret.isNotBlank()) preferences.edit().putString("pluginSecret:${profile.id}", profile.pluginSecret).apply()
+    // The secret is encrypted at rest; a blank value explicitly clears it so the user can revoke it
+    // instead of being stuck with a previously entered key.
+    if (profile.pluginSecret.isBlank()) preferences.edit().remove("pluginSecret:${profile.id}").apply()
+    else runCatching { preferences.edit().putString("pluginSecret:${profile.id}", key.encrypt(profile.pluginSecret)).apply() }
+      .onFailure { Diagnostics.warn("ServerStore", "推送密钥加密失败", it) }
     val updated = profiles().filterNot { it.id == profile.id } + profile
     val json = JSONArray().apply { updated.forEach { item -> put(JSONObject()
       .put("id", item.id).put("name", item.name).put("url", item.url).put("username", item.username)

@@ -50,6 +50,9 @@ fun ChatScreen(
   var rename by remember { mutableStateOf(false) }
   var title by remember(session?.id) { mutableStateOf(session?.title ?: "") }
   var delete by remember { mutableStateOf(false) }
+  // Drafts survive tab switches (the composer is only composed on the chat tab) and are keyed by the
+  // session so switching sessions does not leak text between them (A11).
+  val drafts = remember(state.serverId) { mutableStateMapOf<String, String>() }
 
   if (session == null) {
     Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
@@ -120,10 +123,14 @@ fun ChatScreen(
     // 主视图内容
     when (tab) {
       DetailTab.CHAT -> Conversation(state, controller, Modifier.weight(1f))
-      DetailTab.TODO -> TodoPanel(state.todos, state.protocol, Modifier.weight(1f))
-      DetailTab.CHANGES -> ChangesPanel(state.changes, state.protocol, Modifier.weight(1f))
+      DetailTab.TODO -> TodoPanel(state.todos, Modifier.weight(1f))
+      DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.weight(1f))
       DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
-        // 允许从文件浏览器一键插入到 Chat 输入流
+        // A file reference is an explicit draft edit: insert it and return to the conversation so the
+        // user sees it, instead of only switching tabs and discarding the path (A11).
+        val key = state.sessionId.orEmpty()
+        val current = drafts[key].orEmpty()
+        drafts[key] = if (current.isBlank()) "@$ref " else "$current @$ref "
         tab = DetailTab.CHAT
       }, Modifier.weight(1f))
       DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.weight(1f))
@@ -131,7 +138,7 @@ fun ChatScreen(
 
     // 底部输入区域仅在 Chat Tab 下展示
     if (tab == DetailTab.CHAT) {
-      Composer(state, controller)
+      Composer(state, controller, drafts)
     }
   }
 
@@ -418,6 +425,14 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
           .padding(10.dp)
       )
       Spacer(Modifier.height(12.dp))
+      if (request.always.isNotEmpty()) {
+        Text(
+          "选择“当前会话记住”将保存规则：" + request.always.joinToString(", "),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+      }
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(shape = RoundedCornerShape(6.dp), onClick = { controller.replyPermission(request, "reject") }) {
           Text("拒绝")
@@ -497,17 +512,21 @@ fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Composer(state: MobileState, controller: MobileController) {
-  var draft by remember(state.sessionId) { mutableStateOf("") }
+private fun Composer(state: MobileState, controller: MobileController, drafts: MutableMap<String, String>) {
+  val draftKey = state.sessionId.orEmpty()
   var filePicker by remember { mutableStateOf(false) }
   var fileQuery by remember { mutableStateOf("") }
   var commandPicker by remember { mutableStateOf(false) }
   var modelSheet by remember { mutableStateOf(false) }
   var agentSheet by remember { mutableStateOf(false) }
+  // Track the exact text that was submitted so a successful send only clears what this send owned,
+  // leaving anything typed while it was in flight (A11).
+  var submitted by remember(state.sessionId) { mutableStateOf<String?>(null) }
 
   val task = state.tasks[state.sessionId]
   val waiting = task?.phase in TaskState.WAITING_PHASES
   val running = task?.phase in TaskState.RUNNING_PHASES
+  val draft = drafts[draftKey].orEmpty()
 
   Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp, vertical = 6.dp)) {
     if (!state.connected) {
@@ -544,7 +563,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
           }
           BasicTextField(
             value = draft,
-            onValueChange = { draft = it },
+            onValueChange = { drafts[draftKey] = it },
             modifier = Modifier.fillMaxWidth(),
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
             maxLines = 6
@@ -560,7 +579,11 @@ private fun Composer(state: MobileState, controller: MobileController) {
               shape = RoundedCornerShape(6.dp),
               onClick = {
                 val text = draft.trim()
-                controller.send(text) { draft = "" }
+                submitted = text
+                controller.send(text) {
+                  // Only clear the exact text this send submitted; keep later edits.
+                  if (drafts[draftKey] == submitted) drafts[draftKey] = ""
+                }
               },
               enabled = state.connected && !state.cached && !waiting && !running && draft.isNotBlank()
             ) {
@@ -597,7 +620,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
               TextButton(
                 shape = RoundedCornerShape(6.dp),
                 onClick = {
-                  draft = if (draft.isBlank()) "@$path " else "$draft @$path "
+                  drafts[draftKey] = if (draft.isBlank()) "@$path " else "$draft @$path "
                   filePicker = false
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -621,7 +644,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
         LazyColumn(Modifier.heightIn(max = 260.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
           items(state.commands) { cmd ->
             FluentCard(onClick = {
-              draft = "/${cmd.name} "
+              drafts[draftKey] = "/${cmd.name} "
               commandPicker = false
             }) {
               Text("/${cmd.name}", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
@@ -697,10 +720,10 @@ private fun ActionChip(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
+private fun TodoPanel(todos: List<TodoItem>, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     if (todos.isEmpty()) item {
-      Text(if (!protocol.supportsTodosAndDiff) "当前 OpenCode V2 未提供独立待办列表。" else "当前会话暂无待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text("当前会话暂无待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     items(todos) { todo ->
       FluentCard {
@@ -716,10 +739,10 @@ private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier:
 }
 
 @Composable
-private fun ChangesPanel(changes: List<FileChange>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
+private fun ChangesPanel(changes: List<FileChange>, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     if (changes.isEmpty()) item {
-      Text(if (!protocol.supportsTodosAndDiff) "当前 OpenCode V2 接口未暴露独立差异汇总。" else "暂无文件改动记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text("暂无文件改动记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     items(changes) { change ->
       var open by remember(change.path) { mutableStateOf(false) }

@@ -8,6 +8,14 @@
 - 每一个 tag 都必须新增 `docs/releases/<tag>.md`，内容用中文说明本次更新、验证结果和已知限制。工作流会在缺少文件时直接失败。
 - 版本号使用 `vMAJOR.MINOR.PATCH`；预发布版本在末尾追加 `-alpha.N`、`-beta.N` 或 `-rc.N`，例如 `v0.1.0-rc.1`。
 
+## 稳定签名与产物
+
+- 正式发布必须使用受保护的稳定签名，否则无法覆盖升级已安装的版本。
+- 在仓库 Secrets 配置 `OPENCODE_MOBILE_KEYSTORE_FILE`（keystore 的绝对路径，通常由工作流先行写入 runner 临时目录）、`OPENCODE_MOBILE_KEYSTORE_PASSWORD`、`OPENCODE_MOBILE_KEY_ALIAS`、`OPENCODE_MOBILE_KEY_PASSWORD`。
+- 配齐后工作流构建 `:app:assembleRelease`（`isDebuggable=false`）并校验签名；未配齐时正式发布会直接失败。
+- 预发布在缺少上述 secrets 时回退到 debug 签名，并在 Release 说明中标注。
+- keystore 与密钥只存放在受保护的 Secrets 或密钥管理器中，不得进入仓库。
+
 ## 发布流程
 
 1. 完成功能和验证，更新 `docs/releases/<tag>.md`。

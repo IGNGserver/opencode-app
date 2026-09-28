@@ -31,8 +31,7 @@ data class MessagePart(
   val path: String = "",
   val error: String = "",
   val patch: String = "",
-  val files: List<String> = emptyList(),
-  val attachments: List<String> = emptyList()
+  val files: List<String> = emptyList()
 )
 data class PermissionRequest(
   val id: String,
@@ -49,7 +48,6 @@ data class QuestionPrompt(
   val title: String,
   val options: List<QuestionOption>,
   val multiple: Boolean,
-  val header: String = "",
   val custom: Boolean = false
 )
 data class QuestionRequest(val id: String, val sessionId: String, val directory: String, val questions: List<QuestionPrompt>)
@@ -59,10 +57,9 @@ data class FileChange(
   val after: String,
   val additions: Int,
   val deletions: Int,
-  val patch: String = "",
-  val status: String = "modified"
+  val patch: String = ""
 )
-data class FileNode(val path: String, val type: String, val name: String = "")
+data class FileNode(val path: String, val type: String)
 data class FileContent(val type: String, val content: String)
 data class ModelChoice(val providerId: String, val modelId: String, val label: String)
 data class AgentChoice(val name: String, val description: String)
@@ -131,13 +128,12 @@ internal fun JSONObject.toMessagePart(): MessagePart {
   val state = obj("state")
   val type = str("type")
   val files = (0 until arr("files").length()).mapNotNull { index -> arr("files").optString(index).takeIf(String::isNotBlank) }
-  val attachments = state.arr("attachments").objects().map { it.str("filename").ifBlank { it.str("url") } }
   return MessagePart(
     id = str("id"), type = type,
     text = str("text").ifBlank { str("description").ifBlank { str("prompt") } }, tool = str("tool"),
     title = state.str("title"), status = state.str("status"), input = state.valueText("input"),
     output = state.valueText("output").ifBlank { state.valueText("result") }, path = str("filename").ifBlank { str("path").ifBlank { str("url") } },
-    error = state.errorMessage().ifBlank { errorMessage() }, patch = str("patch"), files = files, attachments = attachments
+    error = state.errorMessage().ifBlank { errorMessage() }, patch = str("patch"), files = files
   )
 }
 
@@ -162,16 +158,11 @@ private fun JSONObject.toV2Message(): Message {
 /** Projects one V2 `message.part.updated` part object. */
 internal fun JSONObject.toV2MessagePart(): MessagePart {
   val state = obj("state")
-  val attachments = state.arr("attachments").objects().map { it.str("name").ifBlank { it.str("url") } }
-  val outputPaths = (0 until state.arr("outputPaths").length()).mapNotNull { index ->
-    state.arr("outputPaths").optString(index).takeIf(String::isNotBlank)
-  }
   return MessagePart(
     id = str("id"), type = str("type"), text = str("text"), tool = str("name"),
     status = state.str("status"), input = state.valueText("input"),
     output = state.valueText("result").ifBlank { state.valueText("content") },
-    error = state.errorMessage().ifBlank { errorMessage() },
-    files = outputPaths, attachments = attachments
+    error = state.errorMessage().ifBlank { errorMessage() }
   )
 }
 internal fun JSONObject.toPermission(directory: String): PermissionRequest {
@@ -192,15 +183,15 @@ internal fun JSONObject.toQuestion(directory: String): QuestionRequest = Questio
   str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
   arr("questions").objects().map { q -> QuestionPrompt(
     q.str("question"), q.arr("options").objects().map { QuestionOption(it.str("label"), it.str("description")) },
-    q.optBoolean("multiple"), q.str("header"), q.optBoolean("custom")
+    q.optBoolean("multiple"), q.optBoolean("custom")
   ) }
 )
 internal fun JSONObject.toTodo(): TodoItem = TodoItem(str("content"), str("status"), str("priority"))
 internal fun JSONObject.toChange(): FileChange = FileChange(
   path = str("file"), after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
-  patch = str("patch"), status = str("status").ifBlank { "modified" }
+  patch = str("patch")
 )
-internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"), str("name"))
+internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"))
 internal fun JSONObject.toFileContent(): FileContent = FileContent(
   str("type").ifBlank { if (str("encoding") == "base64") "binary" else "text" },
   str("content")
@@ -243,7 +234,9 @@ object TaskReducer {
         when {
           part.str("type") == "reasoning" -> TaskState(sessionId, TaskPhase.THINKING, "正在思考", since)
           part.str("type") == "tool" -> {
-            val tool = part.str("tool")
+            // V1 parts carry `tool`; V2 parts carry `name`. Read both so the same V2 event produces the
+            // same phase through the reducer as through the plugin (A13).
+            val tool = part.str("tool").ifBlank { part.str("name") }
             val phase = when {
               tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
               tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(part.obj("state").obj("input").toString()) -> TaskPhase.TESTING

@@ -2,6 +2,9 @@ package com.igng.opencode.mobile.core
 
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import java.util.concurrent.TimeUnit
 
 /**
@@ -17,4 +20,6 @@ import java.util.concurrent.TimeUnit
 internal object SharedHttp {
   val connectionPool = ConnectionPool(maxIdleConnections = 5, keepAliveDuration = 5, timeUnit = TimeUnit.MINUTES)
   val dispatcher = Dispatcher()
+  /** Blocking HTTP work; shared so per-API instances do not each leak a scope. */
+  val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 }
