@@ -34,6 +34,7 @@ private enum class DetailTab(val label: String) { CHAT("对话"), TODO("待办")
 fun ChatScreen(
   state: MobileState,
   controller: MobileController,
+  drafts: MutableMap<String, String>,
   onBack: () -> Unit
 ) {
   val session = state.session
@@ -50,7 +51,16 @@ fun ChatScreen(
   var rename by remember { mutableStateOf(false) }
   var title by remember(session?.id) { mutableStateOf(session?.title ?: "") }
   var delete by remember { mutableStateOf(false) }
+  // Drafts survive tab switches (the composer is only composed on the chat tab) and are keyed by the
+  // session so switching sessions does not leak text between them (A11).
 
+
+  state.savedPermissions?.let { rules ->
+    AlertDialog(onDismissRequest = controller::closeSavedPermissions, title = { Text("已保存的项目权限") },
+      text = { LazyColumn { if (rules.isEmpty()) item { Text("没有已保存规则") }; items(rules, key = { it.id }) { rule ->
+        Column { Text("${rule.action} · ${rule.resource}"); TextButton(onClick = { controller.revokeSavedPermission(rule) }) { Text("撤销") } }
+      } } }, confirmButton = { TextButton(onClick = controller::closeSavedPermissions) { Text("关闭") } })
+  }
   if (session == null) {
     Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -120,10 +130,14 @@ fun ChatScreen(
     // 主视图内容
     when (tab) {
       DetailTab.CHAT -> Conversation(state, controller, Modifier.weight(1f))
-      DetailTab.TODO -> TodoPanel(state.todos, state.protocol, Modifier.weight(1f))
-      DetailTab.CHANGES -> ChangesPanel(state.changes, state.protocol, Modifier.weight(1f))
+      DetailTab.TODO -> TodoPanel(state.todos, Modifier.weight(1f))
+      DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.weight(1f))
       DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
-        // 允许从文件浏览器一键插入到 Chat 输入流
+        // A file reference is an explicit draft edit: insert it and return to the conversation so the
+        // user sees it, instead of only switching tabs and discarding the path (A11).
+        val key = "${state.serverId}:${state.sessionId}"
+        val current = drafts[key].orEmpty()
+        editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
         tab = DetailTab.CHAT
       }, Modifier.weight(1f))
       DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.weight(1f))
@@ -131,7 +145,7 @@ fun ChatScreen(
 
     // 底部输入区域仅在 Chat Tab 下展示
     if (tab == DetailTab.CHAT) {
-      Composer(state, controller)
+      Composer(state, controller, drafts)
     }
   }
 
@@ -146,6 +160,7 @@ fun ChatScreen(
 
         if (state.protocol.supportsSessionActions) {
           ActionRow("✏️ 重命名会话") { menuSheet = false; title = session.title; rename = true }
+          if (state.supportsSavedPermissions) ActionRow("已保存权限") { menuSheet = false; controller.loadSavedPermissions() }
           ActionRow("🌿 分支 / 分叉会话 (Fork)") { menuSheet = false; controller.fork() }
           ActionRow("🔗 分享链接") { menuSheet = false; controller.share() }
           ActionRow("🔒 取消分享") { menuSheet = false; controller.unshare() }
@@ -248,7 +263,7 @@ private fun Conversation(state: MobileState, controller: MobileController, modif
       }
     }
     items(state.messages, key = { "message-${it.id}" }) { message -> MessageCard(message) }
-    items(permissions, key = { "permission-${it.id}" }) { PermissionPanel(it, controller) }
+    items(permissions, key = { "permission-${it.id}" }) { PermissionPanel(it, controller, state.supportsSavedPermissions) }
     items(questions, key = { "question-${it.id}" }) { QuestionPanel(it, controller) }
   }
 }
@@ -390,7 +405,12 @@ private fun MarkdownText(markdown: String) {
 }
 
 @Composable
-fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
+fun PermissionPanel(request: PermissionRequest, controller: MobileController, canSave: Boolean) {
+  var confirmSave by remember(request.id) { mutableStateOf(false) }
+  if (confirmSave) AlertDialog(onDismissRequest = { confirmSave = false }, title = { Text("保存项目权限规则") },
+    text = { Text("规则将保存在服务器项目中，适用于后续任务，可在会话菜单的“已保存权限”中撤销。\n" + request.always.joinToString("\n")) },
+    confirmButton = { TextButton(onClick = { confirmSave = false; controller.replyPermission(request, "always") }) { Text("保存并允许") } },
+    dismissButton = { TextButton(onClick = { confirmSave = false }) { Text("取消") } })
   val isDangerous = request.action.contains("shell", true) || request.action.contains("write", true) || request.action.contains("delete", true)
   val borderColor = if (isDangerous) Fluent.amber else MaterialTheme.colorScheme.primary
 
@@ -418,6 +438,14 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
           .padding(10.dp)
       )
       Spacer(Modifier.height(12.dp))
+      if (request.always.isNotEmpty()) {
+        Text(
+          "选择“始终允许”将在服务器保存规则：" + request.always.joinToString(", "),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+      }
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(shape = RoundedCornerShape(6.dp), onClick = { controller.replyPermission(request, "reject") }) {
           Text("拒绝")
@@ -429,8 +457,8 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
         ) {
           Text("允许一次")
         }
-        TextButton(shape = RoundedCornerShape(6.dp), onClick = { controller.replyPermission(request, "always") }) {
-          Text("当前会话记住")
+        if (canSave && request.always.isNotEmpty()) TextButton(shape = RoundedCornerShape(6.dp), onClick = { confirmSave = true }) {
+          Text("始终允许")
         }
       }
     }
@@ -439,12 +467,26 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
 
 @Composable
 fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
-  var answers by remember(request.id) { mutableStateOf(List(request.questions.size) { emptyList<String>() }) }
-  var custom by remember(request.id) { mutableStateOf(List(request.questions.size) { "" }) }
+  var answers by remember(request) { mutableStateOf(request.questions.map { question -> question.defaultAnswers().filter { value -> question.options.any { it.value == value } } }) }
+  var custom by remember(request) { mutableStateOf(request.questions.map { question ->
+    question.defaultAnswers().firstOrNull()?.takeIf { value -> question.options.none { it.value == value } }.orEmpty()
+  }) }
+  val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+  val answerRows = answers.mapIndexed { index, list -> custom[index].trim().takeIf { it.isNotEmpty() }?.let { if (request.questions[index].multiple) list + it else listOf(it) } ?: list }
+  val fieldValues = if (request.form) request.questions.mapIndexed { i, q -> org.json.JSONObject(q.field).str("key") to answerRows[i] }.toMap() else emptyMap()
 
   FluentCard {
     StatePill(TaskPhase.WAITING_QUESTION, "需要你的回答")
     request.questions.forEachIndexed { index, question ->
+      val field = question.field.takeIf { it.isNotBlank() }?.let { org.json.JSONObject(it) }
+      if (field != null && !formVisible(field, fieldValues)) return@forEachIndexed
+      if (field?.str("type") == "external") {
+        Text(question.title)
+        val url = field.str("url")
+        if (url.startsWith("https://")) TextButton(onClick = { uriHandler.openUri(url) }) { Text("打开外部表单页面") }
+        else Text("外部页面仅支持 HTTPS，请在服务器确认此项")
+        return@forEachIndexed
+      }
       Spacer(Modifier.height(12.dp))
       Text(question.title, style = MaterialTheme.typography.titleMedium)
       question.options.forEach { option ->
@@ -452,14 +494,15 @@ fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
           Modifier.fillMaxWidth().clickable {
             answers = answers.toMutableList().also { list ->
               list[index] = if (question.multiple) {
-                if (option.label in list[index]) list[index] - option.label else list[index] + option.label
-              } else listOf(option.label)
+                if (option.value in list[index]) list[index] - option.value else list[index] + option.value
+              } else listOf(option.value)
             }
+            if (!question.multiple) custom = custom.toMutableList().also { it[index] = "" }
           }.padding(vertical = 4.dp),
           verticalAlignment = Alignment.CenterVertically
         ) {
-          if (question.multiple) Checkbox(option.label in answers[index], onCheckedChange = null)
-          else RadioButton(option.label in answers[index], onClick = null)
+          if (question.multiple) Checkbox(option.value in answers[index], onCheckedChange = null)
+          else RadioButton(option.value in answers[index], onClick = null)
           Spacer(Modifier.width(6.dp))
           Column {
             Text(option.label, style = MaterialTheme.typography.bodyMedium)
@@ -489,7 +532,7 @@ fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
             if (value.isBlank()) list else if (request.questions[index].multiple) list + value else listOf(value)
           })
         },
-        enabled = answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) }
+        enabled = if (request.form) runCatching { formAnswer(request, answerRows) }.isSuccess else answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) }
       ) { Text("提交回答") }
     }
   }
@@ -497,17 +540,21 @@ fun QuestionPanel(request: QuestionRequest, controller: MobileController) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Composer(state: MobileState, controller: MobileController) {
-  var draft by remember(state.sessionId) { mutableStateOf("") }
+private fun Composer(state: MobileState, controller: MobileController, drafts: MutableMap<String, String>) {
+  val draftKey = "${state.serverId}:${state.sessionId}"
   var filePicker by remember { mutableStateOf(false) }
   var fileQuery by remember { mutableStateOf("") }
   var commandPicker by remember { mutableStateOf(false) }
   var modelSheet by remember { mutableStateOf(false) }
   var agentSheet by remember { mutableStateOf(false) }
+  // Track the exact text that was submitted so a successful send only clears what this send owned,
+  // leaving anything typed while it was in flight (A11).
+
 
   val task = state.tasks[state.sessionId]
   val waiting = task?.phase in TaskState.WAITING_PHASES
   val running = task?.phase in TaskState.RUNNING_PHASES
+  val draft = drafts[draftKey].orEmpty()
 
   Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp, vertical = 6.dp)) {
     if (!state.connected) {
@@ -544,7 +591,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
           }
           BasicTextField(
             value = draft,
-            onValueChange = { draft = it },
+            onValueChange = { editDraft(drafts, draftKey, it) },
             modifier = Modifier.fillMaxWidth(),
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
             maxLines = 6
@@ -560,7 +607,11 @@ private fun Composer(state: MobileState, controller: MobileController) {
               shape = RoundedCornerShape(6.dp),
               onClick = {
                 val text = draft.trim()
-                controller.send(text) { draft = "" }
+                val submittedRevision = drafts["revision:$draftKey"]
+                controller.send(text) {
+                  // Only clear the exact text this send submitted; keep later edits.
+                  if (drafts["revision:$draftKey"] == submittedRevision) editDraft(drafts, draftKey, "")
+                }
               },
               enabled = state.connected && !state.cached && !waiting && !running && draft.isNotBlank()
             ) {
@@ -597,7 +648,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
               TextButton(
                 shape = RoundedCornerShape(6.dp),
                 onClick = {
-                  draft = if (draft.isBlank()) "@$path " else "$draft @$path "
+                  editDraft(drafts, draftKey, if (draft.isBlank()) "@$path " else "$draft @$path ")
                   filePicker = false
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -621,7 +672,7 @@ private fun Composer(state: MobileState, controller: MobileController) {
         LazyColumn(Modifier.heightIn(max = 260.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
           items(state.commands) { cmd ->
             FluentCard(onClick = {
-              draft = "/${cmd.name} "
+              editDraft(drafts, draftKey, "/${cmd.name} ")
               commandPicker = false
             }) {
               Text("/${cmd.name}", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
@@ -697,10 +748,10 @@ private fun ActionChip(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
+private fun TodoPanel(todos: List<TodoItem>, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     if (todos.isEmpty()) item {
-      Text(if (!protocol.supportsTodosAndDiff) "当前 OpenCode V2 未提供独立待办列表。" else "当前会话暂无待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text("当前会话暂无待办事项。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     items(todos) { todo ->
       FluentCard {
@@ -716,10 +767,10 @@ private fun TodoPanel(todos: List<TodoItem>, protocol: ServerProtocol, modifier:
 }
 
 @Composable
-private fun ChangesPanel(changes: List<FileChange>, protocol: ServerProtocol, modifier: Modifier = Modifier) {
+private fun ChangesPanel(changes: List<FileChange>, modifier: Modifier = Modifier) {
   LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     if (changes.isEmpty()) item {
-      Text(if (!protocol.supportsTodosAndDiff) "当前 OpenCode V2 接口未暴露独立差异汇总。" else "暂无文件改动记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text("暂无文件改动记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     items(changes) { change ->
       var open by remember(change.path) { mutableStateOf(false) }
@@ -822,4 +873,9 @@ private fun ChildrenPanel(children: List<Session>, controller: MobileController,
       }
     }
   }
+}
+
+internal fun editDraft(drafts: MutableMap<String, String>, key: String, value: String) {
+  drafts[key] = value
+  drafts["revision:$key"] = ((drafts["revision:$key"]?.toLongOrNull() ?: 0L) + 1).toString()
 }

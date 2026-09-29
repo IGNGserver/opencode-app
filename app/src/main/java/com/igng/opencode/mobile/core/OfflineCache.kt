@@ -1,6 +1,7 @@
 package com.igng.opencode.mobile.core
 
 import android.content.Context
+import android.content.SharedPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -9,54 +10,117 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
-class OfflineCache(context: Context) {
-  private val preferences = context.getSharedPreferences("offline_cache", Context.MODE_PRIVATE)
-  private val cipher = KeystoreCipher("opencode-mobile-offline-cache")
-  private val writes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+class OfflineCache internal constructor(
+  private val preferences: SharedPreferences,
+  private val encrypt: (String) -> String,
+  private val decrypt: (String) -> String,
+  private val writes: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+) {
+  constructor(context: Context) : this(context.getSharedPreferences("offline_cache", Context.MODE_PRIVATE),
+    KeystoreCipher("opencode-mobile-offline-cache")::encrypt, KeystoreCipher("opencode-mobile-offline-cache")::decrypt)
   private val pendingLock = Any()
-  private val pending = HashMap<String, String>()
+  private val pending = LinkedHashMap<String, () -> String>()
+  // Monotonic sequence per key. A write is committed only while it is still the newest intent for
+  // that key, so a batch that was dequeued before a delete (or a newer write) is discarded instead of
+  // resurrecting data the user removed (A14).
+  private val nameSequence = HashMap<String, Long>()
+  private val inFlight = mutableSetOf<String>()
+  private var sequence = 0L
+  private val index = ArrayList<String>()
   private var writer: Job? = null
+
+  private fun nextSequence(name: String): Long {
+    val value = ++sequence
+    nameSequence[name] = value
+    return value
+  }
+  private fun touchIndex(name: String) {
+    index.remove(name)
+    index.add(name)
+    while (index.isNotEmpty() && (index.size > MAX_ENTRIES || cacheBytes() > MAX_TOTAL_BYTES)) evict(index.first())
+    pruneSequences()
+    persistIndex()
+  }
+  /** Keeps [nameSequence] from growing with every session ever opened. */
+  private fun cacheBytes(): Long = preferences.all.filterKeys { it.startsWith(CATALOG_PREFIX) || it.startsWith(MESSAGES_PREFIX) }
+    .values.sumOf { (it as? String)?.length?.times(2L) ?: 0L }
+  private fun pruneSequences() {
+    nameSequence.keys.retainAll(index.toSet() + pending.keys + inFlight)
+  }
+  private fun evict(name: String) {
+    index.remove(name)
+    synchronized(pendingLock) {
+      pending.remove(name)
+      nextSequence(name)
+    }
+    preferences.edit().remove(name).apply()
+  }
+  private fun persistIndex() {
+    preferences.edit().putString(INDEX_KEY, JSONArray(index).toString()).apply()
+  }
+  private fun loadIndex() {
+    index += runCatching { JSONArray(preferences.getString(INDEX_KEY, "[]")).let { array -> (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) } } }.getOrDefault(emptyList())
+  }
+  init {
+    loadIndex()
+    // Keys written before this version (or evicted from the index) are adopted so the bound still
+    // applies to an upgraded install.
+    preferences.all.keys.filter { it.startsWith(CATALOG_PREFIX) || it.startsWith(MESSAGES_PREFIX) }
+      .filterNot(index::contains).forEach { index.add(it) }
+    while (index.isNotEmpty() && (index.size > MAX_ENTRIES || cacheBytes() > MAX_TOTAL_BYTES)) evict(index.first())
+    if (index.isNotEmpty()) persistIndex()
+  }
   // Serialization and AES-GCM encryption of large transcripts are CPU-bound. Queue them on a
   // dedicated IO scope so refreshing a session never blocks the UI thread. Draining a snapshot of
   // the pending map means a fast stream cannot grow an unbounded encryption backlog and the latest
   // value for a key always wins, while writes stay ordered.
-  private fun write(name: String, value: String) {
+  private fun write(name: String, produce: () -> String) {
     synchronized(pendingLock) {
-      pending[name] = value
+      pending[name] = produce
+      nextSequence(name)
       if (writer == null) writer = writes.launch { drainWrites() }
     }
   }
   private suspend fun drainWrites() {
-    try {
-      while (true) {
-        val batch = synchronized(pendingLock) {
-          if (pending.isEmpty()) {
-            writer = null
-            return
-          }
-          pending.toMap().also { pending.clear() }
-        }
-        for ((name, value) in batch) {
-          preferences.edit().putString(name, cipher.encrypt(value)).apply()
+    while (true) {
+      val batch = synchronized(pendingLock) {
+        if (pending.isEmpty()) { writer = null; return }
+        pending.mapValues { (name, produce) -> produce to nameSequence.getValue(name) }.also {
+          inFlight.addAll(it.keys); pending.clear()
         }
       }
-    } catch (_: Exception) {
-      // A failed write must not wedge the drain loop; the next enqueue restarts it.
-      synchronized(pendingLock) { writer = null }
+      for ((name, entry) in batch) {
+        try {
+          val (produce, captured) = entry
+          val encoded = encrypt(produce())
+          synchronized(pendingLock) {
+            // Validation and commit share the delete lock. Encryption may finish after a deletion;
+            // only the exact still-live write intent can reach preferences.
+            if (nameSequence[name] == captured && encoded.length * 2L <= MAX_ENTRY_BYTES) {
+              preferences.edit().putString(name, encoded).apply()
+              touchIndex(name)
+            }
+          }
+        } catch (error: Exception) { Diagnostics.warn("OfflineCache", "缓存写入失败", error) }
+        finally { synchronized(pendingLock) { inFlight.remove(name); pruneSequences() } }
+      }
     }
   }
+  internal suspend fun awaitWrites() { while (true) { val job = synchronized(pendingLock) { writer } ?: return; job.join() } }
   private fun read(name: String): String? = try {
     val encoded = preferences.getString(name, null) ?: return null
-    cipher.decrypt(encoded)
+    decrypt(encoded)
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "读取 $name 失败", error)
     null
   }
   fun saveCatalog(serverId: String, projects: List<Project>, sessions: List<Session>) {
-    val data = JSONObject().put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
-      .put("sessions", JSONArray().apply { sessions.take(300).forEach { put(JSONObject().put("id", it.id).put("directory", it.directory)
-        .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId)) } })
-    write("catalog:$serverId", data.toString())
+    write("catalog:$serverId") {
+      JSONObject().put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
+        .put("sessions", JSONArray().apply { sessions.take(300).forEach { put(JSONObject().put("id", it.id).put("directory", it.directory)
+          .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId)) } })
+        .toString()
+    }
   }
   fun catalog(serverId: String): Pair<List<Project>, List<Session>>? {
     val raw = read("catalog:$serverId") ?: return null
@@ -70,16 +134,17 @@ class OfflineCache(context: Context) {
   }
   }
   fun saveMessages(serverId: String, sessionId: String, messages: List<Message>) {
-    val data = JSONArray().apply { messages.takeLast(100).forEach { message ->
-      put(JSONObject().put("id", message.id).put("role", message.role).put("created", message.created).put("error", message.error)
-        .put("parts", JSONArray().apply { message.parts.forEach { part ->
-          put(JSONObject().put("id", part.id).put("type", part.type).put("text", part.text.take(20_000))
-            .put("tool", part.tool).put("title", part.title).put("status", part.status).put("input", part.input.take(4_000))
-            .put("output", part.output.take(4_000)).put("path", part.path).put("error", part.error.take(4_000))
-            .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)).put("attachments", JSONArray(part.attachments)))
-        } }))
-    } }
-    write("messages:$serverId:$sessionId", data.toString())
+    write("messages:$serverId:$sessionId") {
+      JSONArray().apply { messages.takeLast(100).forEach { message ->
+        put(JSONObject().put("id", message.id).put("role", message.role).put("created", message.created).put("error", message.error)
+          .put("parts", JSONArray().apply { message.parts.forEach { part ->
+            put(JSONObject().put("id", part.id).put("type", part.type).put("text", part.text.take(20_000))
+              .put("tool", part.tool).put("title", part.title).put("status", part.status).put("input", part.input.take(4_000))
+              .put("output", part.output.take(4_000)).put("path", part.path).put("error", part.error.take(4_000))
+              .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)))
+          } }))
+      } }.toString()
+    }
   }
   fun messages(serverId: String, sessionId: String): List<Message> {
     val raw = read("messages:$serverId:$sessionId") ?: return emptyList()
@@ -87,10 +152,8 @@ class OfflineCache(context: Context) {
     JSONArray(raw).objects().map { item ->
       Message(item.str("id"), item.str("role"), item.optLong("created"), item.arr("parts").objects().map { part ->
         MessagePart(part.str("id"), part.str("type"), part.str("text"), part.str("tool"), part.str("title"), part.str("status"), part.str("input"), part.str("output"), part.str("path"), part.str("error"), part.str("patch"),
-          (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) },
-          (0 until part.arr("attachments").length()).mapNotNull { index -> part.arr("attachments").optString(index).takeIf(String::isNotBlank) })
-      }, item.str("error").ifBlank { null })
-    }
+          (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) })
+      }, item.str("error").ifBlank { null })    }
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "messages 解析失败", error)
     emptyList()
@@ -98,10 +161,35 @@ class OfflineCache(context: Context) {
   }
   fun delete(serverId: String) {
     synchronized(pendingLock) {
-      pending.keys.removeAll { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }
-      preferences.edit().apply {
-        preferences.all.keys.filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.forEach(::remove)
-      }.apply()
+      val matches = (index + preferences.all.keys + pending.keys + inFlight + nameSequence.keys).filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.toSet()
+      matches.forEach { name ->
+        pending.remove(name)
+        nextSequence(name)
+        preferences.edit().remove(name).apply()
+      }
+      index.removeAll(matches)
+      persistIndex()
     }
+  }
+
+  /** Drops the cached transcript for one session, used when the session is deleted server-side. */
+  fun deleteMessages(serverId: String, sessionId: String) {
+    val name = "messages:$serverId:$sessionId"
+    synchronized(pendingLock) {
+      pending.remove(name)
+      nextSequence(name)
+      preferences.edit().remove(name).apply()
+      index.remove(name)
+      persistIndex()
+    }
+  }
+
+  private companion object {
+    const val INDEX_KEY = "__index"
+    const val CATALOG_PREFIX = "catalog:"
+    const val MESSAGES_PREFIX = "messages:"
+    const val MAX_ENTRIES = 150
+    const val MAX_TOTAL_BYTES = 16_000_000L
+    const val MAX_ENTRY_BYTES = 2_000_000L
   }
 }

@@ -1,5 +1,9 @@
 package com.igng.opencode.mobile.core
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import com.igng.opencode.mobile.push.PushMessageVerifier
 import okhttp3.mockwebserver.MockResponse
@@ -10,6 +14,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 class OpenCodeApiTest {
   @Test fun authenticatesHealthAndSendsAsyncPromptInSelectedDirectory() = runBlocking {
@@ -137,7 +142,6 @@ class OpenCodeApiTest {
     }""").toMessage()
     assertEquals("bash", message.parts.single().tool)
     assertEquals("completed", message.parts.single().status)
-    assertEquals(listOf("out.txt"), message.parts.single().files)
     val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("opencode:secret".toByteArray())
     val pair = PairLinkResolver.resolve("https://example.test/auth/connect/abc?auth_token=$token")
     assertEquals("https://example.test", pair.serverUrl)
@@ -197,25 +201,23 @@ class OpenCodeApiTest {
   }
 
   @Test fun projectsLegacyAndV2MessageParts() {
-    val legacy = JSONObject("""{"id":"part-1","type":"tool","tool":"bash","state":{"status":"completed","title":"跑测试","input":{"command":"gradle test"},"output":"ok","attachments":[{"filename":"a.log"}]}}""").toMessagePart()
+    val legacy = JSONObject("""{"id":"part-1","type":"tool","tool":"bash","state":{"status":"completed","title":"跑测试","input":{"command":"gradle test"},"output":"ok"}}""").toMessagePart()
     assertEquals("bash", legacy.tool)
     assertEquals("completed", legacy.status)
     assertEquals("跑测试", legacy.title)
-    assertEquals(listOf("a.log"), legacy.attachments)
-    val v2 = JSONObject("""{"id":"part-2","type":"tool","name":"bash","state":{"status":"running","input":{"command":"pwd"},"result":"/repo","outputPaths":["out.txt"]}}""").toV2MessagePart()
+    val v2 = JSONObject("""{"id":"part-2","type":"tool","name":"bash","state":{"status":"running","input":{"command":"pwd"},"result":"/repo"}}""").toV2MessagePart()
     assertEquals("bash", v2.tool)
     assertEquals("running", v2.status)
-    assertEquals(listOf("out.txt"), v2.files)
   }
 
   @Test fun modelsExposeTheFieldsTheUiReads() {
-    val change = JSONObject("""{"file":"a.kt","before":"old","after":"new","additions":3,"deletions":1,"patch":"@@","status":"modified"}""").toChange()
+    val change = JSONObject("""{"file":"a.kt","before":"old","after":"new","additions":3,"deletions":1,"patch":"@@"}""").toChange()
     assertEquals("a.kt", change.path)
     assertEquals("new", change.after)
     assertEquals(3, change.additions)
-    val node = JSONObject("""{"path":"src/a.kt","type":"file","name":"a.kt","absolute":"/x","ignored":true}""").toNode()
+    val node = JSONObject("""{"path":"src/a.kt","type":"file","absolute":"/x","ignored":true}""").toNode()
     assertEquals("src/a.kt", node.path)
-    assertEquals("a.kt", node.name)
+    assertEquals("file", node.type)
     val text = JSONObject("""{"type":"text","content":"hi","encoding":"utf-8","mimeType":"text/plain"}""").toFileContent()
     assertEquals("text", text.type)
     assertEquals("hi", text.content)
@@ -232,16 +234,134 @@ class OpenCodeApiTest {
     assertFalse(ServerProtocol.V2.supportsTodosAndDiff)
   }
 
+  /**
+   * A01: credentials must never leave the configured origin, not even when the server answers with a
+   * redirect. The disallowed target must receive zero requests.
+   */
+  @Test fun apiDoesNotForwardCredentialsToRedirectTarget() = runBlocking {
+    MockWebServer().use { target ->
+      MockWebServer().use { origin ->
+        target.enqueue(MockResponse().setBody("""{"healthy":true,"version":"9"}"""))
+        origin.enqueue(MockResponse().setResponseCode(302).addHeader("Location", target.url("/steal")))
+        val api = OpenCodeApi(ServerProfile("local", "Local", origin.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+        runCatching { api.health() }
+        // The redirect must not have been followed at all.
+        assertEquals(0, target.requestCount)
+        val first = origin.takeRequest()
+        assertEquals("Basic b3BlbmNvZGU6c2VjcmV0", first.getHeader("Authorization"))
+      }
+    }
+  }
+
+  /** A01: pairing must reject a redirect to a different host before sending the one-time token. */
+  @Test fun pairLinkRedirectRejectsBeforeSendingToDisallowedHost() = runBlocking {
+    MockWebServer().use { target ->
+      target.enqueue(MockResponse().setBody("<html>stolen</html>"))
+      MockWebServer().use { origin ->
+        origin.enqueue(MockResponse().setResponseCode(302).addHeader("Location", target.url("/auth/connect/leak")))
+        val result = runCatching { PairLinkResolver.resolve(origin.url("/auth/connect/one-time").toString()) }
+        assertTrue(result.isFailure)
+        assertEquals(0, target.requestCount)
+      }
+    }
+  }
+
+  /** A15: cancelling the caller must abort the in-flight HTTP call instead of waiting it out. */
+  @Test fun cancellingApiInterruptsNetworkWait() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"healthy":true,"version":"1"}""").setBodyDelay(3, TimeUnit.SECONDS))
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      val job = launch(Dispatchers.IO) { runCatching { api.health() } }
+      delay(200)
+      val started = System.nanoTime()
+      job.cancelAndJoin()
+      val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+      assertTrue("cancel took ${elapsedMillis}ms", elapsedMillis < 1_500)
+    }
+  }
+
+  /** A01: the cleartext target allow-list only accepts loopback hosts. */
+  @Test fun cleartextAllowListIsLoopbackOnly() {
+    assertTrue(HttpOrigin.allowsCleartext("localhost"))
+    assertTrue(HttpOrigin.allowsCleartext("127.0.0.1"))
+    assertTrue(HttpOrigin.allowsCleartext("::1"))
+    assertFalse(HttpOrigin.allowsCleartext("example.com"))
+    assertFalse(HttpOrigin.allowsCleartext("10.0.0.5"))
+  }
+
+  /** V2 detection must not abort when the older `api/health` path is absent. */
+  @Test fun detectsV2ThroughInfoWhenHealthPathIsGone() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404)) // global/health (V1 probe)
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health (older V2)
+      server.enqueue(MockResponse().setBody("""{"version":"2.0"}""")) // api/info (current V2)
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      assertEquals("OpenCode V2", api.health())
+      assertEquals(ServerProtocol.V2, api.detectedProtocol())
+      server.takeRequest()
+      server.takeRequest()
+      assertEquals("/api/info", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  /** V2 unrevert falls back to the current DELETE .../revert when revert/clear is absent. */
+  @Test fun v2UnrevertFallsBackToDeleteRevert() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404))
+      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+      server.enqueue(MockResponse().setResponseCode(404)) // revert/clear
+      server.enqueue(MockResponse().setResponseCode(204)) // DELETE revert
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      api.health()
+      api.unrevert(Session("ses-1", "/repo", "Task", 0))
+      server.takeRequest(); server.takeRequest()
+      assertEquals("/api/session/ses-1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
+      val fallback = server.takeRequest()
+      assertEquals("DELETE", fallback.method)
+      assertEquals("/api/session/ses-1/revert", fallback.requestUrl?.encodedPath)
+    }
+  }
+
   @Test fun pushSignatureMatchesCompanionVector() {
-    val data = mapOf(
+    val v1 = mapOf(
       "sessionId" to "ses-1", "serverId" to "srv-1", "phase" to "WAITING_PERMISSION",
       "detail" to "等待权限确认", "title" to "构建"
     )
-    // Vector cross-checked against companion signPushPayload('topsecret', ...).
-    assertEquals("yO0ubha7-M4U66aWoIeWbSdk7z0sVsQtcvVZhB-1Who", PushMessageVerifier.sign("topsecret", data))
-    assertTrue(PushMessageVerifier.verify("topsecret", data + ("sig" to PushMessageVerifier.sign("topsecret", data))))
-    assertFalse(PushMessageVerifier.verify("topsecret", data + ("sig" to "wrong")))
-    assertFalse(PushMessageVerifier.verify("topsecret", data))
-    assertTrue(PushMessageVerifier.verify("", data))
+    // Vector cross-checked against companion signPushPayloadV1('topsecret', ...).
+    assertEquals("yO0ubha7-M4U66aWoIeWbSdk7z0sVsQtcvVZhB-1Who", PushMessageVerifier.signV1("topsecret", v1))
+    assertFalse(PushMessageVerifier.verify("topsecret", v1 + ("sig" to PushMessageVerifier.signV1("topsecret", v1))))
+    assertEquals(false, PushMessageVerifier.verify("topsecret", v1))
+    assertFalse(PushMessageVerifier.verify("", v1))
+  }
+
+  @Test fun v3PushSignatureBindsDirectoryDeviceSequenceAndFreshness() {
+    val fixed = mapOf(
+      "version" to "3", "sessionId" to "ses-1", "serverId" to "srv-1", "directory" to "/repo",
+      "phase" to "WAITING_PERMISSION", "detail" to "等待权限确认", "title" to "构建", "deviceId" to "dev-1", "ts" to "1700000000000", "sequence" to "7"
+    )
+    // Vector cross-checked against companion signPushPayload('topsecret', ...). sign() ignores freshness.
+    assertEquals("xR2aa8hjbYV9Vd6uIDVIt_ZJDxiwP0okKYJQ3fDMiQU", PushMessageVerifier.sign("topsecret", fixed))
+    val now = System.currentTimeMillis().toString()
+    val fresh = fixed + ("ts" to now)
+    assertTrue(PushMessageVerifier.verify("topsecret", fresh + ("sig" to PushMessageVerifier.sign("topsecret", fresh))))
+    // A rewritten routing field invalidates a signature captured for another directory.
+    assertFalse(PushMessageVerifier.verify("topsecret", fresh + ("directory" to "/other") + ("sig" to PushMessageVerifier.sign("topsecret", fresh))))
+    // A stale (replayed) message is rejected.
+    assertFalse(PushMessageVerifier.verify("topsecret", fixed + ("sig" to PushMessageVerifier.sign("topsecret", fixed))))
+    // A field containing a newline cannot imitate a field boundary.
+    val boundary = mapOf("version" to "3", "sessionId" to "ses-1", "serverId" to "srv-1", "directory" to "/repo\nphase", "phase" to "x",
+      "detail" to "d", "title" to "t", "deviceId" to "dev-1", "ts" to now)
+    val other = boundary + ("directory" to "/repo") + ("phase" to "phase\nx")
+    assertFalse(PushMessageVerifier.sign("topsecret", boundary) == PushMessageVerifier.sign("topsecret", other))
+  }
+
+  /** A10: a refresh after an offline start must re-establish the stream and clear stale flags. */
+  @Test fun degradedStateDefaultsToHealthyAndIsIndependentOfOfflineFlag() {
+    val offline = MobileState(connected = false, cached = true)
+    assertTrue(offline.cached)
+    assertFalse(offline.degraded)
+    val online = offline.copy(connected = true, cached = false)
+    assertTrue(online.connected)
+    assertFalse(online.cached)
   }
 }

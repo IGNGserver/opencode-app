@@ -10,7 +10,6 @@ import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.core.ServerStore
 import com.igng.opencode.mobile.core.Session
 import com.igng.opencode.mobile.core.TaskPhase
-import com.igng.opencode.mobile.core.TaskState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,17 +32,22 @@ class TaskMonitorService : Service() {
   private val lastShown = HashMap<Pair<String, String>, Pair<TaskPhase, String>>()
   override fun onBind(intent: Intent?): IBinder? = null
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    val serverId = intent?.getStringExtra("serverId") ?: return START_NOT_STICKY
-    val sessionId = intent.getStringExtra("sessionId") ?: return START_NOT_STICKY
-    val profile = ServerStore(this).profiles().firstOrNull { it.id == serverId } ?: return START_NOT_STICKY
+    val serverId = intent?.getStringExtra("serverId") ?: run { stopSelf(); return START_NOT_STICKY }
+    val sessionId = intent.getStringExtra("sessionId") ?: run { stopSelf(); return START_NOT_STICKY }
+    val profile = ServerStore(this).profiles().firstOrNull { it.id == serverId } ?: run { stopSelf(); return START_NOT_STICKY }
     val notifications = TaskNotifications(this)
-    val placeholder = Session(sessionId, "", "OpenCode 任务", 0)
-    val initial = notifications.build(profile, placeholder, TaskState(sessionId, TaskPhase.THINKING, "正在连接任务状态"))
     tracked += serverId to sessionId
-    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, initial, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    else startForeground(FOREGROUND_ID, initial)
+    // A dedicated monitoring notification; kept separate from per-session results so stopping the
+    // foreground state never cancels a real completion/failure notification, and so the foreground
+    // placeholder is not left behind under a session-specific id.
+    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, notifications.buildMonitoring(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    else startForeground(FOREGROUND_ID, notifications.buildMonitoring())
     val controller = MobileController.get(this)
-    if (controller.state.value.serverId != serverId) controller.connect(serverId)
+    if (controller.state.value.serverId != serverId || !profile.notifications) {
+      tracked.remove(serverId to sessionId)
+      if (tracked.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+      return START_NOT_STICKY
+    }
     if (monitor == null) {
       monitor = scope.launch {
         // Plain collect (not collectLatest): emissions are frequent during streaming, and cancelling
@@ -51,7 +55,13 @@ class TaskMonitorService : Service() {
         controller.state.collect { state ->
           tracked.toList().forEach { key ->
             val (trackedServerId, trackedSessionId) = key
-            if (trackedServerId != state.serverId) return@forEach
+            // This service monitors only the current connection. Switching or removing a profile
+            // drops its local tracking; independent companion pushes remain available.
+            if (trackedServerId != state.serverId || state.profiles.none { it.id == trackedServerId && it.notifications } ||
+              state.connected && !state.degraded && state.sessions.none { it.id == trackedSessionId }) {
+              tracked.remove(key); lastShown.remove(key); notifications.cancelLocal(trackedServerId, trackedSessionId)
+              return@forEach
+            }
             val trackedProfile = state.profiles.firstOrNull { it.id == trackedServerId } ?: profile
             val session = state.sessions.firstOrNull { it.id == trackedSessionId } ?: Session(trackedSessionId, "", "OpenCode 任务", 0)
             val task = state.tasks[trackedSessionId] ?: return@forEach
@@ -71,7 +81,9 @@ class TaskMonitorService : Service() {
             }
           }
           if (tracked.isEmpty()) {
-            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_DETACH) else @Suppress("DEPRECATION") stopForeground(false)
+            // DETACH would leave the monitoring notification behind; remove it and then stop.
+            // minSdk is 26, so STOP_FOREGROUND_REMOVE is always available.
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
           }
         }

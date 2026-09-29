@@ -16,7 +16,8 @@ data class PairResolution(val serverUrl: String, val credentials: ServerCredenti
 object PairLinkResolver {
   private val client = OkHttpClient.Builder()
     .followRedirects(true)
-    .followSslRedirects(true)
+    // Never silently downgrade HTTPS to HTTP, even when following a redirect.
+    .followSslRedirects(false)
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(15, TimeUnit.SECONDS)
     .callTimeout(30, TimeUnit.SECONDS)
@@ -33,22 +34,29 @@ object PairLinkResolver {
     val input = requireNotNull(value.trim().toHttpUrlOrNull()) { "配对链接无效" }
     // The one-time pairing token is a bearer credential; never send it over cleartext unless the
     // target is the local loopback (tests/dev). This mirrors the gate in PushRegistration.register.
-    require(input.scheme == "https" || input.host in setOf("localhost", "127.0.0.1", "::1")) {
+    require(input.scheme == "https" || HttpOrigin.allowsCleartext(input.host)) {
       "配对链接必须使用 HTTPS"
     }
     val direct = input.queryParameter("auth_token")
     if (!direct.isNullOrBlank()) return@withContext PairResolution(rootUrl(input), decodeToken(direct))
 
+    // Redirects must stay on the exact origin of the link: the resolver must not walk the one-time
+    // token to another host or downgrade HTTPS→HTTP. A *network* interceptor runs for every redirect
+    // hop, so the disallowed target receives zero requests (A01). SslRedirects are already disabled
+    // so a cross-scheme hop cannot even be attempted.
+    val origin = HttpOrigin.of(input)
     val jar = CapturingCookieJar()
-    val response = client.newBuilder().cookieJar(jar).build()
+    val guarded = client.newBuilder().cookieJar(jar).addNetworkInterceptor { chain ->
+      require(HttpOrigin.of(chain.request().url) == origin) { "配对链接重定向到了未授权地址" }
+      chain.proceed(chain.request())
+    }.build()
+    val response = guarded
       .newCall(Request.Builder().url(input).get().header("Accept", "text/html, */*").build())
       .execute()
     response.use {
       if (!it.isSuccessful && it.code !in 300..399) throw IOException("配对链接返回 HTTP ${it.code}")
       val finalUrl = it.request.url
-      require(finalUrl.scheme == "https" || finalUrl.host in setOf("localhost", "127.0.0.1", "::1")) {
-        "配对链接重定向到了非 HTTPS 地址"
-      }
+      require(HttpOrigin.of(finalUrl) == origin) { "配对链接重定向到了未授权地址" }
       val token = finalUrl.queryParameter("auth_token")
       if (!token.isNullOrBlank()) return@withContext PairResolution(rootUrl(finalUrl), decodeToken(token))
       val cookie = jar.header(finalUrl)

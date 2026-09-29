@@ -32,6 +32,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.igng.opencode.mobile.core.*
 import com.igng.opencode.mobile.push.PushRegistration
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
@@ -120,6 +121,18 @@ fun HomeScreen(
 
     item {
       PageHeader("WORKSPACE", "任务工作台", "刷新", controller::reload)
+      if (state.degraded) {
+        Surface(
+          shape = RoundedCornerShape(8.dp),
+          color = Fluent.amber.copy(alpha = 0.12f),
+          border = BorderStroke(1.dp, Fluent.amber.copy(alpha = 0.4f)),
+          modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+        ) {
+          Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("⚠️ 部分服务器数据本次读取失败，相关状态可能为上一次的已知值。", style = MaterialTheme.typography.bodyMedium, color = Fluent.amber)
+          }
+        }
+      }
       if (state.cached) {
         Surface(
           shape = RoundedCornerShape(8.dp),
@@ -146,8 +159,8 @@ fun HomeScreen(
     item {
       FluentCard(onClick = {
         if (state.connected) {
-          controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "")
-          state.sessionId?.let(onOpen)
+          // Navigate only once the created session is known; do not read the stale sessionId.
+          controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "") { onOpen(it.id) }
         } else {
           onServers()
         }
@@ -280,7 +293,7 @@ fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (St
       PageHeader("PROJECTS & SESSIONS", "会话列表", "新建会话") {
         if (!state.protocol.supportsTitleOnCreate) {
           // V2 协议无需弹窗输入标题，直接一键新建并打开
-          controller.createSession("")
+          controller.createSession("") { onOpen(it.id) }
         } else {
           createDialog = true
         }
@@ -329,7 +342,7 @@ fun SessionsScreen(state: MobileState, controller: MobileController, onOpen: (St
       },
       confirmButton = {
         TextButton(shape = RoundedCornerShape(6.dp), onClick = {
-          controller.createSession(newTitle.ifBlank { "新任务" })
+          controller.createSession(newTitle.ifBlank { "新任务" }) { onOpen(it.id) }
           newTitle = ""
           createDialog = false
         }, enabled = state.connected && state.project != null) { Text("创建") }
@@ -374,15 +387,11 @@ fun ServersModal(
               val pair = PairLinkResolver.isPairLink(profile.url)
               val resolved = if (pair) PairLinkResolver.resolve(profile.url) else null
               val actualProfile = if (resolved == null) profile else profile.copy(url = resolved.serverUrl, username = resolved.credentials.username)
-              val savedCredentials = controller.credentials(profile.id)
-              val credentials = resolved?.credentials ?: ServerCredentials(
-                username = actualProfile.username,
-                password = password ?: savedCredentials.password,
-                cookie = savedCredentials.cookie
-              )
+              val savedUrl = state.profiles.firstOrNull { it.id == profile.id }?.url
+              val credentials = resolved?.credentials ?: profileCredentials(savedUrl, actualProfile.url,
+                controller.credentials(profile.id), actualProfile.username, password)
               val version = controller.testServer(actualProfile, credentials)
-              if (resolved == null) controller.saveServer(actualProfile, password, credentialUsername = actualProfile.username)
-              else controller.saveServer(actualProfile, resolved.credentials.password, resolved.credentials.cookie, resolved.credentials.username)
+              controller.saveServer(actualProfile, credentials.password, credentials.cookie, credentials.username)
               done("已连接 OpenCode $version")
               showForm = false
               editing = null
@@ -572,14 +581,14 @@ private fun ServerForm(
         TextField(
           value = pluginSecret,
           onValueChange = { pluginSecret = it },
-          label = { Text("推送校验密钥（OPENCODE_MOBILE_PLUGIN_SECRET）") },
+          label = { Text("推送验证密钥（OPENCODE_MOBILE_PUSH_SECRET）") },
           visualTransformation = PasswordVisualTransformation(),
           modifier = Modifier.fillMaxWidth(),
           singleLine = true
         )
       }
       item {
-        Text("填写与服务器 OPENCODE_MOBILE_PLUGIN_SECRET 相同的密钥，用于校验后台推送、防止伪造通知。留空则不做校验。",
+        Text("填写服务器独立的 OPENCODE_MOBILE_PUSH_SECRET。留空将拒绝后台推送；不要使用插件入站认证密钥。",
           style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
       item { SwitchRow("自动连接此服务器", autoConnect, { autoConnect = it }) }

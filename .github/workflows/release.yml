@@ -31,27 +31,54 @@ jobs:
       RELEASE_TYPE: ${{ inputs.release_type || 'pre-release' }}
     steps:
       - name: 检出版本
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: 设置 Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: '17'
 
       - name: 设置 Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: companion/package-lock.json
 
-      - name: 构建并验证 Android
+      - name: 注入签名和可选 Firebase 配置
+        env:
+          KEYSTORE_BASE64: ${{ secrets.OPENCODE_MOBILE_KEYSTORE_BASE64 }}
+          FIREBASE_CONFIG_BASE64: ${{ secrets.OPENCODE_MOBILE_FIREBASE_CONFIG_BASE64 }}
         run: |
-          ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleDebug
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64" || { echo "预发布和正式版都需要稳定签名" >&2; exit 1; }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/opencode-release.jks"
+          echo "OPENCODE_MOBILE_KEYSTORE_FILE=$RUNNER_TEMP/opencode-release.jks" >> "$GITHUB_ENV"
+          if [[ -n "$FIREBASE_CONFIG_BASE64" ]]; then
+            printf '%s' "$FIREBASE_CONFIG_BASE64" | base64 --decode > app/google-services.json
+            echo "PUSH_VARIANT=包含 Firebase 配置" >> "$GITHUB_ENV"
+          else
+            echo "PUSH_VARIANT=不含 FCM；配置伴随服务地址不能启用编译期缺失的推送能力" >> "$GITHUB_ENV"
+          fi
+
+      - name: 构建并验证 Android
+        env:
+          OPENCODE_MOBILE_KEYSTORE_PASSWORD: ${{ secrets.OPENCODE_MOBILE_KEYSTORE_PASSWORD }}
+          OPENCODE_MOBILE_KEY_ALIAS: ${{ secrets.OPENCODE_MOBILE_KEY_ALIAS }}
+          OPENCODE_MOBILE_KEY_PASSWORD: ${{ secrets.OPENCODE_MOBILE_KEY_PASSWORD }}
+          OPENCODE_MOBILE_REQUIRE_RELEASE_SIGNING: 'true'
+        run: |
+          set -euo pipefail
+          export OPENCODE_MOBILE_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))
+          export OPENCODE_MOBILE_VERSION_NAME="${RELEASE_TAG#v}"
+          echo "OPENCODE_MOBILE_VERSION_CODE=$OPENCODE_MOBILE_VERSION_CODE" >> "$GITHUB_ENV"
+          echo "OPENCODE_MOBILE_VERSION_NAME=$OPENCODE_MOBILE_VERSION_NAME" >> "$GITHUB_ENV"
+          ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleRelease
 
       - name: 验证 companion
         working-directory: companion
@@ -77,13 +104,50 @@ jobs:
               echo "这是 OpenCode Mobile 预发布版本，用于验证本次更新。"
             fi
             echo
+            echo "推送变体：$PUSH_VARIANT"
+            echo
             cat "$notes"
             echo
             echo "## 自动验证"
             echo
-            echo "- Android 单元测试和 Debug APK 构建已由 GitHub Actions 执行。"
+            echo "- Android 单元测试和 APK 构建已由 GitHub Actions 执行。"
             echo "- companion 测试已由 GitHub Actions 执行。"
           } > release-notes.md
+
+      - name: 定位构建产物
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=$(./gradlew -q :app:printReleaseApkPath)
+          if [[ -z "$apk" || ! -f "$apk" ]]; then
+            echo "APK 不存在" >&2
+            exit 1
+          fi
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: 校验产物（非调试、固定证书）
+        shell: bash
+        env:
+          EXPECTED_CERT: ${{ secrets.OPENCODE_MOBILE_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          apk="${{ steps.apk.outputs.path }}"
+          build_tools=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -n 1)
+          if "$build_tools/aapt2" dump badging "$apk" | grep -q "application-debuggable"; then
+            echo "发布产物不应是 debuggable：$apk" >&2
+            exit 1
+          fi
+          "$build_tools/apksigner" verify --print-certs "$apk" > signing.txt
+          if grep -q "CN=Android Debug" signing.txt; then
+            echo "正式版不能使用调试签名" >&2
+            exit 1
+          fi
+          test -n "$EXPECTED_CERT" || { echo "缺少固定证书指纹" >&2; exit 1; }
+          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
+          test "$actual" = "$expected" || { echo "签名证书与发布配置不匹配" >&2; exit 1; }
+          echo "签名及非调试产物检查通过"
 
       - name: 发布 GitHub Release
         env:
@@ -91,13 +155,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          apk="/tmp/opencode-mobile-gradle/app/outputs/apk/debug/app-debug.apk"
-          if [[ ! -f "$apk" ]]; then
-            echo "APK 不存在：$apk" >&2
-            exit 1
-          fi
+          apk="${{ steps.apk.outputs.path }}"
           args=("$RELEASE_TAG" "$apk" --title "OpenCode Mobile ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag)
           if [[ "$RELEASE_TYPE" == "pre-release" ]]; then
             args+=(--prerelease)
           fi
           gh release create "${args[@]}"
+
+      - name: 清理 runner 签名材料
+        if: always()
+        run: rm -f "$RUNNER_TEMP/opencode-release.jks" app/google-services.json
