@@ -160,24 +160,32 @@ export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verif
     }
   }
   async function drainOutbox() {
-    if (drainOutbox.running) return
+    // Coalesce concurrent triggers: a second drain started while one awaits a send is remembered and
+    // re-run afterwards, rather than being dropped (which could leave a queued retry without a timer).
+    if (drainOutbox.running) { drainOutbox.pending = true; return }
     drainOutbox.running = true
     try {
-      for (let index = outbox.length - 1; index >= 0; index--) {
-        const item = outbox[index]
-        if ((item.nextAttemptAt ?? 0) > Date.now()) continue
-        // eslint-disable-next-line no-await-in-loop
-        const done = await deliver(item)
-        if (done) outbox.splice(index, 1)
-        else item.nextAttemptAt = Date.now() + Math.min(retryDelayMs * 2 ** item.attempts, 10 * 60_000)
-      }
-      if (outbox.length > 0) {
-        timer = setTimeout(() => { timer = null; drainOutbox().catch(() => {}) }, retryDelayMs)
-        if (timer.unref) timer.unref()
-      }
+      do {
+        drainOutbox.pending = false
+        for (let index = outbox.length - 1; index >= 0; index--) {
+          const item = outbox[index]
+          if ((item.nextAttemptAt ?? 0) > Date.now()) continue
+          // eslint-disable-next-line no-await-in-loop
+          const done = await deliver(item)
+          if (done) outbox.splice(index, 1)
+          else item.nextAttemptAt = Date.now() + Math.min(retryDelayMs * 2 ** item.attempts, 10 * 60_000)
+        }
+        if (outbox.length > 0) {
+          if (timer) { clearTimeout(timer); timer = null }
+          const wait = Math.max(1, Math.min(...outbox.map(item => (item.nextAttemptAt ?? 0) - Date.now())))
+          timer = setTimeout(() => { timer = null; drainOutbox().catch(() => {}) }, wait)
+          if (timer.unref) timer.unref()
+        }
+      } while (drainOutbox.pending)
       await saveOutbox()
     } finally {
       drainOutbox.running = false
+      if (drainOutbox.pending) drainOutbox().catch(() => {})
     }
   }
   /** Serializes handling of one session so concurrent events reduce and deliver in a stable order. */
