@@ -16,6 +16,7 @@
 - 版本名来自 tag；版本码为 `1000 + GITHUB_RUN_NUMBER`。正常发布须按运行顺序完成，不得将旧 tag 重新构建为较新升级版本；工作流更名/计数重置前需迁移版本码基数。
 - 本地未配置 keystore 的 assembleRelease 仅用于编译验证，可能使用 debug 签名，不能作为发布产物。历史 debug 签名安装包无法用新稳定证书直接覆盖，应在目标设备验证迁移并事先保存服务器配置。
 - keystore、口令、Firebase 配置均不得进入仓库。CI 在成功或失败后清理注入文件。
+- 当前签名证书指纹、主备份位置和恢复步骤见 [`docs/ANDROID_SIGNING.md`](ANDROID_SIGNING.md)；生成 keystore 摘要见 [`docs/ANDROID_SIGNING_MANIFEST.txt`](ANDROID_SIGNING_MANIFEST.txt)。
 
 ## 发布流程
 

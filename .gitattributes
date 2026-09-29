@@ -6,3 +6,5 @@
 *.apk binary
 *.keystore binary
 *.jks binary
+*.p12 binary
+*.pfx binary
