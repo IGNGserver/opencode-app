@@ -86,6 +86,8 @@ class OpenCodeApi(
   /** Dedicated scope for blocking HTTP work so a cancelled caller never waits on the socket. */
   private val ioScope = SharedHttp.ioScope
   @Volatile private var protocol = ServerProtocol.UNKNOWN
+  @Volatile private var currentV2 = false
+  fun supportsSavedPermissions() = currentV2
 
   init {
     require(base.scheme == "https" || base.scheme == "http" && profile.allowCleartext) { "HTTP 明文连接未获授权，请在服务器资料中明确开启" }
@@ -200,31 +202,35 @@ class OpenCodeApi(
     path: String,
     query: Map<String, String> = emptyMap(),
     dropAfterFirst: Set<String> = emptySet()
-  ): List<JSONObject> {
+  ): List<JSONObject> = withContext(Dispatchers.IO) {
     val result = mutableListOf<JSONObject>()
     val seen = mutableSetOf<String>()
     var cursor: String? = null
     // A misbehaving server could hand out a fresh cursor forever; bound both the page count and the
     // total items so one listing cannot exhaust memory or spin indefinitely (A15).
     var pages = 0
+    var totalChars = 0L
     do {
-      if (pages++ >= MAX_PAGES) break
+      if (pages++ >= MAX_PAGES) throw IOException("列表超过分页上限，请在服务器缩小查询范围")
       val pageQuery = query.toMutableMap().apply {
         if (cursor != null) {
           put("cursor", cursor!!)
           dropAfterFirst.forEach(::remove)
         }
       }
-      val page = obj(path, query = pageQuery)
+      val raw = request("GET", path, query = pageQuery)
+      totalChars += raw.length
+      if (totalChars > MAX_RESPONSE_CHARS * 2L) throw IOException("列表数据过大，未使用不完整结果")
+      val page = JSONObject(raw)
       result += page.optJSONArray("data")?.objects().orEmpty()
-      if (result.size >= MAX_PAGE_ITEMS) {
-        Diagnostics.warn("OpenCodeApi", "分页结果超过 $MAX_PAGE_ITEMS 条，已截断 $path")
-        break
+      if (result.size > MAX_PAGE_ITEMS) {
+        throw IOException("列表超过 $MAX_PAGE_ITEMS 条，未使用不完整结果")
       }
       val next = page.obj("cursor").str("next").takeIf { it.isNotBlank() }
-      cursor = next?.takeIf(seen::add)
+      if (next != null && !seen.add(next)) throw IOException("服务器返回重复分页游标，未使用不完整结果")
+      cursor = next
     } while (cursor != null)
-    return result
+    result
   }
   private fun segment(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
   /** Percent-encodes each `/`-separated segment so the result can be passed to [url] unchanged. */
@@ -272,6 +278,7 @@ class OpenCodeApi(
     }
     // A responding info endpoint means the server is up; the body shape is version-specific.
     obj("api/info")
+    currentV2 = true
     return "OpenCode V2"
   }
   suspend fun projects(): List<Project> = when (ensureProtocol()) {
@@ -299,10 +306,11 @@ class OpenCodeApi(
       ServerProtocol.UNKNOWN -> emptyMap()
     }
   }
-  suspend fun messages(sessionId: String, directory: String): List<Message> = when (ensureProtocol()) {
+  suspend fun messages(sessionId: String, directory: String): List<Message> = withContext(Dispatchers.IO) { when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("session/${segment(sessionId)}/message", directory).objects().map { it.toMessage() }
     ServerProtocol.V2 -> dataObjects("api/session/${segment(sessionId)}/message", query = mapOf("order" to "asc"), dropAfterFirst = setOf("order")).map { it.toMessage() }
     ServerProtocol.UNKNOWN -> emptyList()
+  }
   }
   suspend fun createSession(directory: String, title: String): Session = when (ensureProtocol()) {
     ServerProtocol.V1 -> JSONObject(request("POST", "session", directory, body = JSONObject().put("title", title))).toSession()
@@ -365,7 +373,7 @@ class OpenCodeApi(
   suspend fun unrevert(session: Session) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "session/${segment(session.id)}/unrevert", session.directory)
-      ServerProtocol.V2 -> try {
+      ServerProtocol.V2 -> if (currentV2) request("DELETE", "api/session/${segment(session.id)}/revert") else try {
         request("POST", "api/session/${segment(session.id)}/revert/clear")
       } catch (error: ApiException) {
         // The current V2 API clears the revert stage with DELETE .../revert.
@@ -386,7 +394,7 @@ class OpenCodeApi(
       ServerProtocol.V2 -> {
         if (!agent.isNullOrBlank()) request("POST", "api/session/${segment(session.id)}/agent", body = JSONObject().put("agent", agent))
         if (model != null) request("POST", "api/session/${segment(session.id)}/model", body = JSONObject().put("model", JSONObject().put("providerID", model.providerId).put("id", model.modelId)))
-        request("POST", "api/session/${segment(session.id)}/prompt", body = JSONObject().put("prompt", JSONObject().put("text", text)))
+        request("POST", "api/session/${segment(session.id)}/prompt", body = if (currentV2) JSONObject().put("text", text) else JSONObject().put("prompt", JSONObject().put("text", text)))
       }
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
@@ -438,15 +446,19 @@ class OpenCodeApi(
       ServerProtocol.V2 -> dataArray(obj("api/permission/request", query = locationQuery(directory))).objects().map { it.toPermission(directory) }
       ServerProtocol.UNKNOWN -> emptyList()
     }
-  } catch (e: ApiException) { if (e.status == 404) emptyList() else throw e }
+  } catch (e: ApiException) { throw e }
   suspend fun questions(directory: String): List<QuestionRequest> = try {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> arr("question", directory).objects().map { it.toQuestion(directory) }
-      ServerProtocol.V2 -> dataArray(obj("api/question/request", query = locationQuery(directory))).objects().map { it.toQuestion(directory) }
+      ServerProtocol.V2 -> if (currentV2) dataArray(obj("api/form", query = locationQuery(directory))).objects().map { it.toForm(directory) }
+        else dataArray(obj("api/question/request", query = locationQuery(directory))).objects().map { it.toQuestion(directory) }
       ServerProtocol.UNKNOWN -> emptyList()
     }
-  } catch (e: ApiException) { if (e.status == 404) emptyList() else throw e }
+  } catch (e: ApiException) { throw e }
   suspend fun replyPermission(request: PermissionRequest, reply: String) {
+    ensureProtocol()
+    require(reply in setOf("once", "always", "reject")) { "未知权限决定" }
+    require(reply != "always" || currentV2 && request.always.isNotEmpty()) { "无法确认保存规则范围，请仅允许一次" }
     when (ensureProtocol()) {
       ServerProtocol.V1 -> try {
         request("POST", "permission/${segment(request.id)}/reply", request.directory, body = JSONObject().put("reply", reply))
@@ -456,11 +468,16 @@ class OpenCodeApi(
           body = JSONObject().put("response", reply).put("remember", reply == "always"))
       }
       ServerProtocol.V2 -> request("POST", "api/session/${segment(request.sessionId)}/permission/${segment(request.id)}/reply",
-        body = JSONObject().put("reply", reply.lowercase().let { if (it == "allow") "once" else it }))
+        body = JSONObject().put(if (currentV2) "decision" else "reply", reply))
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
   suspend fun replyQuestion(request: QuestionRequest, answers: List<List<String>>) {
+    if (request.form) {
+      this.request("POST", "api/session/${segment(request.sessionId)}/form/${segment(request.id)}/reply",
+        body = JSONObject().put("answer", formAnswer(request, answers)))
+      return
+    }
     val array = JSONArray()
     answers.forEach { row -> array.put(JSONArray(row)) }
     when (ensureProtocol()) {
@@ -471,12 +488,20 @@ class OpenCodeApi(
     }
   }
   suspend fun rejectQuestion(request: QuestionRequest) {
+    if (request.form) { this.request("DELETE", "api/session/${segment(request.sessionId)}/form/${segment(request.id)}"); return }
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "question/${segment(request.id)}/reject", request.directory)
       ServerProtocol.V2 -> request("POST", "api/session/${segment(request.sessionId)}/question/${segment(request.id)}/reject")
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+  suspend fun savedPermissions(projectId: String): List<SavedPermission> {
+    ensureProtocol(); check(currentV2) { "此版本不支持已保存权限管理" }
+    return dataArray(obj("api/permission/saved", query = mapOf("projectID" to projectId))).objects().map {
+      SavedPermission(it.str("id"), it.str("projectID"), it.str("action"), it.str("resource"))
+    }
+  }
+  suspend fun revokePermission(id: String) { ensureProtocol(); check(currentV2); request("DELETE", "api/permission/saved/${segment(id)}") }
   suspend fun todos(session: Session): List<TodoItem> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("session/${segment(session.id)}/todo", session.directory).objects().map { it.toTodo() }
     ServerProtocol.V2 -> emptyList()
@@ -520,13 +545,14 @@ class OpenCodeApi(
     }
   }
 
-  fun events(lastEventId: String? = null): Flow<ServerEvent> = callbackFlow {
+  fun events(lastEventId: String? = null, onOpen: () -> Unit = {}): Flow<ServerEvent> = callbackFlow {
     val path = if (protocol == ServerProtocol.V1) "global/event" else "api/event"
     val builder = requestBuilder(path, null, emptyMap()).header("Accept", "text/event-stream")
     if (!lastEventId.isNullOrBlank()) builder.header("Last-Event-ID", lastEventId)
     val request = builder.build()
     requireOrigin(request)
     val source: EventSource = EventSources.createFactory(streamClient).newEventSource(request, object : EventSourceListener() {
+      override fun onOpen(eventSource: EventSource, response: Response) { onOpen() }
       override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
         try {
           val event = data.toServerEvent(id.orEmpty())
@@ -551,7 +577,7 @@ class OpenCodeApi(
     awaitClose { source.cancel() }
   }
 
-  private suspend fun requestObject(method: String, path: String, body: JSONObject): JSONObject = JSONObject(request(method, path, body = body))
+  private suspend fun requestObject(method: String, path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) { JSONObject(request(method, path, body = body)) }
 
   private fun unsupported(message: String): Nothing = throw ApiException(501, message)
 
@@ -583,7 +609,7 @@ class OpenCodeApi(
 internal fun String.toServerEvent(sseId: String): ServerEvent {
   val json = JSONObject(this)
   val payload = json.optJSONObject("payload")
-  if (payload != null) return ServerEvent(sseId, json.str("directory"), payload.str("type"), payload.obj("properties"))
+  if (payload != null) return payload.toString().toServerEvent(sseId).copy(directory = json.str("directory"))
   val type = json.str("type")
   val data = json.optJSONObject("data") ?: json.obj("properties")
   val properties = when (type) {
@@ -591,7 +617,7 @@ internal fun String.toServerEvent(sseId: String): ServerEvent {
       put("id", data.str("id")); put("sessionID", data.str("sessionID")); put("permission", data.str("action"))
       put("patterns", data.arr("resources")); put("always", data.arr("save")); put("metadata", data.obj("metadata"))
       val source = data.obj("source")
-      if (source.str("type") == "tool") put("tool", JSONObject().put("messageID", source.str("messageID")).put("callID", source.str("callID")))
+      if (source.str("type") == "tool") put("tool", JSONObject().put("messageID", source.str("messageID")).put("callID", source.str("id").ifBlank { source.str("callID") }))
     }
     else -> data
   }

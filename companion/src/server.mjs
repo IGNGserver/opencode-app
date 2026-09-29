@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises'
+import { readFile, rename, mkdir, open } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto'
@@ -10,7 +10,7 @@ const ACTIVE_PHASES = new Set(['THINKING', 'TOOL', 'SUBAGENT', 'TESTING', 'WAITI
 export function mapEvent(event, previous) {
   const { type, status, tool, partType } = event
   if (type === 'session.status') {
-    if (status === 'busy') return { phase: 'THINKING', detail: '正在处理' }
+    if (status === 'busy' || status === 'running') return previous && ACTIVE_PHASES.has(previous.phase) && !previous.phase.startsWith('WAITING') ? { phase: previous.phase, detail: previous.detail } : { phase: 'THINKING', detail: '正在处理' }
     if (status === 'retry') return { phase: 'THINKING', detail: '正在重试' }
     if (status === 'idle') return ACTIVE_PHASES.has(previous?.phase) ? { phase: 'COMPLETED', detail: '任务已完成' } : null
   }
@@ -24,7 +24,7 @@ export function mapEvent(event, previous) {
   if (type === 'message.part.updated' && partType === 'tool') {
     const kind = ['TESTING', 'SUBAGENT', 'TOOL'].includes(event.toolKind)
       ? event.toolKind
-      : /test|gradle|pytest|vitest|jest/i.test(tool ?? '') ? 'TESTING' : tool === 'task' ? 'SUBAGENT' : 'TOOL'
+      : /test|gradle|pytest|vitest|jest/i.test(tool ?? '') ? 'TESTING' : ['task', 'subagent'].includes(tool) ? 'SUBAGENT' : 'TOOL'
     return { phase: kind, detail: `正在运行 ${String(tool || '工具').slice(0, 40)}` }
   }
   return null
@@ -37,262 +37,248 @@ export function safeEqual(left, right) {
 }
 
 /**
- * Canonical signed payload (v2), byte-identical to the app's PushMessageVerifier.payloadV2().
+ * Canonical signed payload (v3), byte-identical to the app's PushMessageVerifier.payload().
  *
  * Length-prefixing each field removes the field-boundary ambiguity of newline joining (e.g. a `\n`
  * inside `detail` must not be able to imitate a boundary into `title`), and `directory`/`deviceId`
  * are signed so they cannot be rewritten in transit.
  */
-export const SIGNED_FIELDS_V2 = ['version', 'sessionId', 'serverId', 'directory', 'phase', 'detail', 'title', 'deviceId', 'ts']
+export const SIGNED_FIELDS_V3 = ['version', 'sessionId', 'serverId', 'directory', 'phase', 'detail', 'title', 'deviceId', 'ts', 'sequence']
 export function signPushPayload(pluginSecret, data) {
-  const fields = SIGNED_FIELDS_V2.map(key => String(data[key] ?? ''))
-  const canonical = '2|' + fields.map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('|')
+  const fields = SIGNED_FIELDS_V3.map(key => String(data[key] ?? ''))
+  const canonical = '3|' + fields.map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('|')
   return createHmac('sha256', pluginSecret).update(canonical, 'utf8').digest('base64url')
 }
 
-/** Legacy v1 payload, still accepted during migration. */
+/** Legacy test vector only. Production clients reject v1/v2. */
 export function signPushPayloadV1(pluginSecret, data) {
   const canonical = ['sessionId', 'serverId', 'phase', 'detail', 'title'].map(key => data[key] ?? '').join('\n')
   return createHmac('sha256', pluginSecret).update(canonical, 'utf8').digest('base64url')
 }
 
 const DEVICE_TTL_MS = 180 * 24 * 60 * 60 * 1000
+const MESSAGE_TTL_MS = 24 * 60 * 60 * 1000
+const keyOf = (server, device) => JSON.stringify([server, device])
 
-export function createCompanion({ opencodeUrl, pluginSecret, registryFile, verifyDevice, send, fetchSession, serverKey = "", outboxFile = registryFile + '.outbox', retryDelayMs = 5_000 }) {
-  const STATE_TTL_MS = 6 * 60 * 60 * 1000
-  const MAX_STATES = 2000
-  const MAX_OUTBOX = 500
-  const MAX_SEND_ATTEMPTS = 6
-  const devices = new Map()
-  const states = new Map()
-  // Durable delivery queue. A state update is only recorded as delivered once the device send has
-  // been accepted; failures stay queued and are retried, so a transient FCM error cannot silently
-  // drop the only completion notification (A06).
-  const outbox = []
-  // Per-session serial queue: concurrent events for one session are reduced and delivered in order.
-  const sessionQueues = new Map()
-  let persist = Promise.resolve()
-  let outboxPersist = Promise.resolve()
-  let timer = null
-
-  async function load() {
-    try {
-      const data = JSON.parse(await readFile(registryFile, 'utf8'))
-      for (const item of data.devices ?? []) devices.set(`${item.serverKey || item.serverId}:${item.deviceId}`, item)
-    } catch (error) { if (error.code !== 'ENOENT') throw error }
-    try {
-      const data = JSON.parse(await readFile(outboxFile, 'utf8'))
-      for (const item of data.pending ?? []) outbox.push(item)
-    } catch (error) { if (error.code !== 'ENOENT') throw error }
-    pruneDevices()
-  }
-  function pruneDevices(now = Date.now()) {
-    for (const [key, device] of devices) if (now - (device.updated ?? 0) > DEVICE_TTL_MS) devices.delete(key)
-  }
-  function isExpired(device, now = Date.now()) {
-    return now - (device.updated ?? 0) > DEVICE_TTL_MS
-  }
-  // Per-session push state is only a de-dup cache; bound it so a long-lived process (or a flood of
-  // distinct session ids) cannot grow the heap without limit.
-  function pruneStates(now = Date.now()) {
-    for (const [key, value] of states) if (now - (value.at ?? 0) > STATE_TTL_MS) states.delete(key)
-    while (states.size > MAX_STATES) states.delete(states.keys().next().value)
-  }
-  async function writeRegistry() {
-    pruneDevices()
+// One atomic file owns registration, reduction history and pending delivery. Acknowledging an event
+// before this transaction commits would create a crash window between deduplication and delivery.
+export function createCompanion({ pluginSecret, pushSecret, registryFile, verifyDevice, send, fetchSession = async () => ({}),
+  serverKey = '', outboxFile = registryFile + '.outbox', retryDelayMs = 5_000, maxOutbox = 500 }) {
+  if (!pluginSecret || !pushSecret || pushSecret === pluginSecret) throw new Error('independent plugin and push secrets are required')
+  let data = { version: 3, devices: [], states: {}, pending: [], accepted: {}, sequence: 0, deadLetters: [] }
+  let serial = Promise.resolve(), timer = null, draining = null, stopped = false
+  async function persist(next) {
     await mkdir(dirname(registryFile), { recursive: true, mode: 0o700 })
-    const temp = `${registryFile}.tmp`
-    await writeFile(temp, JSON.stringify({ devices: [...devices.values()] }), { mode: 0o600 })
-    await chmod(temp, 0o600)
+    const temp = registryFile + '.tmp'
+    const file = await open(temp, 'w', 0o600)
+    try { await file.chmod(0o600); await file.writeFile(JSON.stringify(next)); await file.sync() } finally { await file.close() }
     await rename(temp, registryFile)
-  }
-  /** Persists the device registry. A rejected promise must never be chained again; the leading catch
-   *  ensures one disk failure does not permanently stop future writes. */
-  function save() {
-    persist = persist.catch(() => {}).then(writeRegistry).catch(error => {
-      console.error('companion: failed to persist device registry:', error.message)
-    })
-    return persist
-  }
-  /** Same, but the caller must know whether the registry is durable (A08). */
-  async function saveStrict() {
-    persist = persist.catch(() => {}).then(writeRegistry)
-    return persist
-  }
-  function saveOutbox() {
-    outboxPersist = outboxPersist.catch(() => {}).then(async () => {
-      await mkdir(dirname(outboxFile), { recursive: true, mode: 0o700 })
-      const temp = `${outboxFile}.tmp`
-      await writeFile(temp, JSON.stringify({ pending: outbox.slice(-MAX_OUTBOX) }), { mode: 0o600 })
-      await chmod(temp, 0o600)
-      await rename(temp, outboxFile)
-    }).catch(error => {
-      console.error('companion: failed to persist push outbox:', error.message)
-    })
-    return outboxPersist
-  }
-  function enqueue(delivery) {
-    if (outbox.length >= MAX_OUTBOX) outbox.shift()
-    outbox.push(delivery)
-    saveOutbox()
-  }
-  /** Delivers one queued item, retrying with backoff; invalid tokens are dropped. */
-  async function deliver(item) {
-    const device = [...devices.values()].find(candidate => candidate.token === item.token)
-    if (device && isExpired(device)) {
-      console.error('companion: dropping push to expired device', device.deviceId)
-      return true
-    }
     try {
-      await send(item.token, item.payload)
-      return true
+      const dir = await open(dirname(registryFile), 'r')
+      try { await dir.sync() } finally { await dir.close() }
     } catch (error) {
-      const code = error?.errorInfo?.code || error?.code
-      if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token' || code === 'messaging/invalid-argument') {
-        console.error('companion: removing invalid FCM token for a device')
-        for (const [key, candidate] of devices) if (candidate.token === item.token) devices.delete(key)
-        save()
-        return true
-      }
-      item.attempts = (item.attempts ?? 0) + 1
-      item.lastError = String(error?.message ?? error).slice(0, 200)
-      return item.attempts >= MAX_SEND_ATTEMPTS
+      // Rename already committed the visible file. Do not let a subsequent transaction overwrite
+      // it from stale memory if directory fsync fails. The request still fails and may be retried.
+      data = next
+      throw error
     }
+  }
+  function transaction(change) {
+    const result = serial.catch(() => {}).then(async () => {
+      const next = structuredClone(data)
+      const result = await change(next)
+      await persist(next)
+      data = next
+      return result
+    })
+    serial = result.catch(() => {})
+    return result
+  }
+  function validDevice(d, item) {
+    return d.updated > Date.now() - DEVICE_TTL_MS && keyOf(d.serverKey, d.deviceId) === item.deviceKey &&
+      d.token === item.token && d.profileId === item.payload.serverId
+  }
+  function prune(next) {
+    next.devices = next.devices.filter(d => d.updated > Date.now() - DEVICE_TTL_MS)
+    next.pending = next.pending.filter(item => next.devices.some(d => validDevice(d, item)))
+    for (const [key, state] of Object.entries(next.states)) {
+      if (!ACTIVE_PHASES.has(state.phase) && state.at < Date.now() - MESSAGE_TTL_MS) delete next.states[key]
+    }
+    for (const [id, value] of Object.entries(next.accepted)) if ((value.at || value) < Date.now() - MESSAGE_TTL_MS) delete next.accepted[id]
+  }
+  function schedule(delay = null) {
+    if (stopped) return
+    if (timer) clearTimeout(timer)
+    timer = null
+    if (!data.pending.length) return
+    const wait = delay ?? Math.max(1, Math.min(...data.pending.map(item => (item.nextAttemptAt || 0) - Date.now())))
+    timer = setTimeout(() => { timer = null; drainOutbox().catch(error => console.error('companion: delivery transaction failed:', error.message)) }, wait)
+    timer.unref?.()
+  }
+  function deadLetter(next, item, reason) {
+    next.deadLetters.push({ id: item.id, sessionId: item.payload.sessionId, sequence: item.payload.sequence, reason, at: Date.now() })
+    next.deadLetters = next.deadLetters.slice(-200)
+    console.error('companion: delivery moved to dead letters:', reason)
   }
   async function drainOutbox() {
-    // Coalesce concurrent triggers: a second drain started while one awaits a send is remembered and
-    // re-run afterwards, rather than being dropped (which could leave a queued retry without a timer).
-    if (drainOutbox.running) { drainOutbox.pending = true; return }
-    drainOutbox.running = true
-    try {
-      do {
-        drainOutbox.pending = false
-        for (let index = outbox.length - 1; index >= 0; index--) {
-          const item = outbox[index]
-          if ((item.nextAttemptAt ?? 0) > Date.now()) continue
-          // eslint-disable-next-line no-await-in-loop
-          const done = await deliver(item)
-          if (done) outbox.splice(index, 1)
-          else item.nextAttemptAt = Date.now() + Math.min(retryDelayMs * 2 ** item.attempts, 10 * 60_000)
+    if (draining) return draining
+    draining = (async () => {
+      while (!stopped) {
+        await serial
+        const item = data.pending.find(item => (item.nextAttemptAt || 0) <= Date.now())
+        if (!item) break
+        // Registration is checked immediately before send; a withdrawal also removes pending items
+        // atomically. A send already in flight cannot be recalled, but is never requeued afterwards.
+        let error = null
+        const valid = data.devices.some(d => validDevice(d, item))
+        const expired = Number(item.payload.ts) < Date.now() - MESSAGE_TTL_MS
+        if (valid && !expired) {
+          try { await send(item.token, item.payload) } catch (cause) { error = cause }
         }
-        if (outbox.length > 0) {
-          if (timer) { clearTimeout(timer); timer = null }
-          const wait = Math.max(1, Math.min(...outbox.map(item => (item.nextAttemptAt ?? 0) - Date.now())))
-          timer = setTimeout(() => { timer = null; drainOutbox().catch(() => {}) }, wait)
-          if (timer.unref) timer.unref()
-        }
-      } while (drainOutbox.pending)
-      await saveOutbox()
-    } finally {
-      drainOutbox.running = false
-      if (drainOutbox.pending) drainOutbox().catch(() => {})
-    }
+        await transaction(next => {
+          const live = next.pending.find(x => x.id === item.id)
+          if (!live) return // Superseded while this send was in flight.
+          const code = error?.errorInfo?.code || error?.code
+          if (expired) deadLetter(next, item, 'delivery expired')
+          if (code === 'messaging/invalid-argument') deadLetter(next, item, 'invalid payload')
+          if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(code)) {
+            next.devices = next.devices.filter(d => d.token !== item.token)
+            next.pending = next.pending.filter(x => x.token !== item.token)
+          } else if (!error || expired || !valid || code === 'messaging/invalid-argument') {
+            next.pending = next.pending.filter(x => x.id !== item.id)
+          } else {
+            live.attempts += 1
+            live.nextAttemptAt = Date.now() + Math.min(retryDelayMs * 2 ** Math.min(live.attempts, 10), 600_000)
+          }
+        })
+      }
+    })()
+    try { await draining } finally { draining = null; schedule(retryDelayMs) }
   }
-  /** Serializes handling of one session so concurrent events reduce and deliver in a stable order. */
-  function withSessionQueue(key, task) {
-    const previous = sessionQueues.get(key) ?? Promise.resolve()
-    const next = previous.catch(() => {}).then(task).catch(error => {
-      console.error('companion: session delivery failed:', error.message)
-    })
-    sessionQueues.set(key, next)
-    next.finally(() => { if (sessionQueues.get(key) === next) sessionQueues.delete(key) })
-    return next
+  async function load() {
+    let old
+    try { old = JSON.parse(await readFile(registryFile, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    if (old?.version === 3) data = old
+    else if (old) {
+      data.devices = (old.devices || []).map(d => ({ ...d, profileId: d.profileId || d.serverId, serverKey: d.serverKey || d.serverId }))
+      // Upgrade the old queue without discarding user notifications. Keep the newest state per
+      // device/session, re-sign under v3, and persist it before starting delivery.
+      let legacy = []
+      try { legacy = JSON.parse(await readFile(outboxFile, 'utf8')).pending || [] } catch (error) { if (error.code !== 'ENOENT') throw error }
+      for (const item of legacy.sort((a,b) => Number(a.payload.ts) - Number(b.payload.ts))) {
+        const d = data.devices.find(d => d.token === item.token)
+        if (!d) continue
+        const stateKey = keyOf(d.serverKey, item.payload.sessionId)
+        const deviceKey = keyOf(d.serverKey, d.deviceId)
+        const sequence = ++data.sequence
+        const payload = { ...item.payload, version: '3', sequence: String(sequence), deviceId: d.deviceId, serverId: d.profileId }
+        payload.sig = signPushPayload(pushSecret, payload)
+        data.pending = data.pending.filter(x => !(x.deviceKey === deviceKey && x.payload.sessionId === payload.sessionId))
+        data.pending.push({ id: randomUUID(), deviceKey, token: d.token, payload, attempts: 0 })
+        data.states[stateKey] = { phase: payload.phase, detail: payload.detail, at: Number(payload.ts) }
+      }
+    }
+    await transaction(prune)
+    schedule(1)
   }
   async function body(req) {
-    let text = ''
-    for await (const chunk of req) {
-      text += chunk
-      if (text.length > 16_384) throw new Error('request too large')
-    }
-    return JSON.parse(text || '{}')
+    let size = 0; const chunks = []
+    for await (const chunk of req) { size += chunk.length; if (size > 16_384) throw Object.assign(new Error('request too large'), { status: 413 }); chunks.push(chunk) }
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch { throw Object.assign(new Error('invalid JSON'), { status: 400 }) }
   }
-  function reply(res, status, data) {
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-    res.end(JSON.stringify(data))
+  function reply(res, status, value) {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value))
   }
+  const nonempty = (value, max = 1024) => typeof value === 'string' && value.length > 0 && value.length <= max
   async function handle(req, res) {
     try {
       const path = new URL(req.url, 'http://localhost').pathname
-      if (req.method === 'GET' && path === '/health') return reply(res, 200, { healthy: true })
-      if (req.method === 'POST' && path === '/v1/devices') {
+      if (req.method === 'GET' && path === '/health') return reply(res, 200, { healthy: true, pending: data.pending.length, deadLetters: data.deadLetters.length })
+      if (req.method === 'POST' && ['/v1/devices', '/v1/devices/unregister'].includes(path)) {
         if (!await verifyDevice(req.headers.authorization, req.headers.cookie)) return reply(res, 401, { error: 'unauthorized' })
         const input = await body(req)
-        if (![input.deviceId, input.serverKey, input.token].every(x => typeof x === 'string' && x.length > 0 && x.length < 1024)) return reply(res, 400, { error: 'invalid device' })
+        if (!nonempty(input.deviceId) || !nonempty(input.serverKey)) return reply(res, 400, { error: 'invalid device' })
         if (serverKey && input.serverKey !== serverKey) return reply(res, 403, { error: 'wrong server' })
-        devices.set(`${input.serverKey}:${input.deviceId}`, {
-          deviceId: input.deviceId,
-          serverKey: input.serverKey,
-          profileId: typeof input.profileId === 'string' && input.profileId.length > 0 ? input.profileId : input.serverId,
-          token: input.token,
-          updated: Date.now(),
+        const deviceKey = keyOf(input.serverKey, input.deviceId)
+        const remove = path.endsWith('/unregister')
+        const profileId = input.profileId || input.serverId
+        if (!remove && (!nonempty(input.token) || !nonempty(profileId))) return reply(res, 400, { error: 'invalid registration' })
+        await transaction(next => {
+          prune(next)
+          const old = next.devices.find(d => keyOf(d.serverKey, d.deviceId) === deviceKey)
+          next.devices = next.devices.filter(d => keyOf(d.serverKey, d.deviceId) !== deviceKey)
+          if (remove || old?.token !== input.token || old?.profileId !== profileId) next.pending = next.pending.filter(item => item.deviceKey !== deviceKey)
+          if (!remove) next.devices.push({ deviceId: input.deviceId, serverKey: input.serverKey, profileId, token: input.token, updated: Date.now() })
         })
-        // A registration that cannot be persisted is not durable; report a retryable failure instead
-        // of a false success that would vanish on restart (A08).
-        try { await saveStrict() } catch (error) {
-          console.error('companion: registration could not be persisted:', error.message)
-          return reply(res, 503, { error: 'registry unavailable' })
-        }
-        return reply(res, 200, { registered: true })
-      }
-      if (req.method === 'POST' && path === '/v1/devices/unregister') {
-        if (!await verifyDevice(req.headers.authorization, req.headers.cookie)) return reply(res, 401, { error: 'unauthorized' })
-        const input = await body(req)
-        if (typeof input.deviceId !== 'string' || typeof input.serverKey !== 'string') return reply(res, 400, { error: 'invalid device' })
-        for (const [key, device] of devices) {
-          if (device.deviceId === input.deviceId && device.serverKey === input.serverKey) devices.delete(key)
-        }
-        save()
-        return reply(res, 200, { unregistered: true })
+        schedule()
+        return reply(res, 200, remove ? { unregistered: true } : { registered: true })
       }
       if (req.method === 'POST' && path === '/v1/events') {
         if (!safeEqual(req.headers['x-opencode-mobile-secret'], pluginSecret)) return reply(res, 401, { error: 'unauthorized' })
         const event = await body(req)
-        if (typeof event.sessionId !== 'string' || event.sessionId.length > 256 || !event.sessionId || typeof event.type !== 'string' || typeof event.serverKey !== 'string' || !event.serverKey) return reply(res, 400, { error: 'invalid event' })
+        if (event.producerId != null && (!nonempty(event.producerId, 256) || !Number.isSafeInteger(event.sequence) || event.sequence <= 0)) return reply(res, 400, { error: 'invalid producer sequence' })
+        if (!nonempty(event.sessionId, 256) || !nonempty(event.type, 128) || !nonempty(event.serverKey) ||
+          event.id != null && !nonempty(event.id, 256)) return reply(res, 400, { error: 'invalid event' })
         if (serverKey && event.serverKey !== serverKey) return reply(res, 403, { error: 'wrong server' })
-        const stateKey = `${event.serverKey}:${event.sessionId}`
-        await withSessionQueue(stateKey, async () => {
-          pruneStates()
-          const before = states.get(stateKey)
-          const next = mapEvent(event, before)
-          if (!next || (next.phase === before?.phase && next.detail === before?.detail)) return
-          // Record the accepted state before delivery so re-delivery of the same event is de-duped,
-          // but only for events we are actually going to attempt (A06).
-          states.set(stateKey, { ...next, at: Date.now() })
-          const session = await fetchSession(event.sessionId, event.directory).catch(() => ({}))
-          const deviceIds = [...devices.values()].filter(device => device.serverKey === event.serverKey)
-          for (const device of deviceIds) {
-            if (isExpired(device)) continue
-            const payload = {
-              // FCM data messages must be a flat map of string values.
-              version: '2',
-              sessionId: event.sessionId,
-              serverId: device.profileId || device.serverId,
-              directory: String(event.directory ?? '').slice(0, 500),
-              title: String(session.title ?? 'OpenCode 任务').slice(0, 80),
-              phase: next.phase,
-              detail: next.detail,
-              deviceId: device.deviceId,
-              ts: String(Date.now()),
-            }
-            payload.sig = signPushPayload(pluginSecret, payload)
-            enqueue({ id: randomUUID(), token: device.token, payload, attempts: 0 })
+        if (event.observedAt != null && (!Number.isSafeInteger(event.observedAt) || event.observedAt < Date.now() - MESSAGE_TTL_MS || event.observedAt > Date.now() + 60_000)) return reply(res, 422, { error: 'event expired or invalid observation time' })
+        await transaction(async next => {
+          prune(next)
+          const eventKey = event.producerId ? keyOf(event.serverKey, 'producer:' + event.producerId) : event.id ? keyOf(event.serverKey, event.id) : null
+          const accepted = eventKey && next.accepted[eventKey]
+          if (accepted && (!event.producerId || accepted.sequence >= event.sequence)) return
+          const stateKey = keyOf(event.serverKey, event.sessionId), before = next.states[stateKey]
+          const permissions = new Set(before?.permissions || []), questions = new Set(before?.questions || [])
+          if (event.requestId) {
+            if (event.type === 'permission.asked') permissions.add(event.requestId)
+            if (['permission.replied', 'permission.rejected'].includes(event.type)) permissions.delete(event.requestId)
+            if (event.type === 'question.asked') questions.add(event.requestId)
+            if (['question.replied', 'question.rejected'].includes(event.type)) questions.delete(event.requestId)
           }
-          if (deviceIds.length > 0) drainOutbox()
+          let after = mapEvent(event, before)
+          if (after && !['FAILED', 'ABORTED'].includes(after.phase)) {
+            if (permissions.size) after = { phase: 'WAITING_PERMISSION', detail: '等待权限确认' }
+            else if (questions.size) after = { phase: 'WAITING_QUESTION', detail: '等待你的回答' }
+          }
+          if (eventKey) next.accepted[eventKey] = event.producerId ? { sequence: event.sequence, at: Date.now() } : Date.now()
+          if (Object.keys(next.accepted).length > 10_000) throw new Error('event deduplication capacity reached')
+          if (!after) return
+          if (['FAILED', 'ABORTED'].includes(after.phase)) { permissions.clear(); questions.clear() }
+          next.states[stateKey] = { ...after, permissions: [...permissions], questions: [...questions], at: Date.now() }
+          if (Object.keys(next.states).length > 2000) throw new Error('active state capacity reached')
+          if (after.phase === before?.phase && after.detail === before?.detail && !event.type.endsWith('.asked')) return
+          const sequence = ++next.sequence
+          if (!Number.isSafeInteger(sequence)) throw new Error('sequence exhausted')
+          const session = await fetchSession(event.sessionId, event.directory).catch(() => ({}))
+          for (const d of next.devices.filter(d => d.serverKey === event.serverKey)) {
+            const deviceKey = keyOf(d.serverKey, d.deviceId)
+            const payload = { version: '3', sessionId: event.sessionId, serverId: d.profileId, directory: String(event.directory || '').slice(0, 500),
+              title: String(session.title || 'OpenCode 任务').slice(0, 80), phase: after.phase, detail: after.detail,
+              deviceId: d.deviceId, ts: String(Date.now()), sequence: String(sequence) }
+            payload.sig = signPushPayload(pushSecret, payload)
+            // A newer authoritative state supersedes only this device/session's older pending state.
+            next.pending = next.pending.filter(x => !(x.deviceKey === deviceKey && x.payload.sessionId === event.sessionId))
+            if (next.pending.length >= maxOutbox) throw new Error('outbox capacity reached')
+            next.pending.push({ id: randomUUID(), deviceKey, token: d.token, payload, attempts: 0 })
+          }
         })
-        // 202: the event is accepted and will be delivered; it is not a promise of device receipt.
+        schedule(1)
         return reply(res, 202, { accepted: true })
       }
       reply(res, 404, { error: 'not found' })
     } catch (error) {
-      reply(res, error?.message === 'request too large' ? 413 : 400, { error: 'invalid request' })
+      console.error('companion: request not committed:', error.message)
+      reply(res, error.status || 503, { error: error.status ? 'invalid request' : 'durable state unavailable; retry' })
     }
   }
-  return { load, handle, devices, states, outbox, drainOutbox }
+  return { load, handle, drainOutbox, close: async () => { stopped = true; if (timer) clearTimeout(timer); await draining; await serial },
+    get devices() { return new Map(data.devices.map(d => [keyOf(d.serverKey, d.deviceId), d])) },
+    get states() { return new Map(Object.entries(data.states)) }, get outbox() { return structuredClone(data.pending) } }
 }
 
 export async function start() {
   const opencodeUrl = process.env.OPENCODE_URL || 'http://127.0.0.1:4096'
   const pluginSecret = process.env.OPENCODE_MOBILE_PLUGIN_SECRET
+  const pushSecret = process.env.OPENCODE_MOBILE_PUSH_SECRET
   const opencodePassword = process.env.OPENCODE_SERVER_PASSWORD
   const opencodeUsername = process.env.OPENCODE_SERVER_USERNAME || 'opencode'
   if (!pluginSecret || !opencodePassword) throw new Error('OPENCODE_MOBILE_PLUGIN_SECRET and OPENCODE_SERVER_PASSWORD are required')
@@ -303,9 +289,9 @@ export async function start() {
   if (!rawServerKey) throw new Error('OPENCODE_MOBILE_SERVER_KEY is required and must equal the App server URL')
   const configuredServerKey = rawServerKey.replace(/\/+$/, '')
   const protectedProbe = async headers => {
-    const legacy = await fetch(new URL('/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000) })
+    const legacy = await fetch(new URL('/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000), redirect: 'error' })
     if (legacy.status !== 404) return legacy
-    return fetch(new URL('/api/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000) })
+    return fetch(new URL('/api/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000), redirect: 'error' })
   }
   const unauthenticated = await protectedProbe({})
   if (unauthenticated.ok) throw new Error('OpenCode Basic Auth must be enabled')
@@ -315,7 +301,7 @@ export async function start() {
   initializeApp({ credential: applicationDefault(), projectId: process.env.FIREBASE_PROJECT_ID })
   const registryFile = process.env.REGISTRY_FILE || join(homedir(), '.local/state/opencode-mobile/devices.json')
   const companion = createCompanion({
-    opencodeUrl, pluginSecret, registryFile, serverKey: configuredServerKey,
+    opencodeUrl, pluginSecret, pushSecret, registryFile, serverKey: configuredServerKey,
     verifyDevice: async (auth, cookie) => {
       if (typeof auth !== 'string' && typeof cookie !== 'string') return false
       const headers = {}
@@ -329,9 +315,9 @@ export async function start() {
       const headers = { authorization: credentials }
       const legacyEndpoint = new URL(`/session/${encodeURIComponent(id)}`, opencodeUrl)
       if (directory) legacyEndpoint.searchParams.set('directory', directory)
-      const legacy = await fetch(legacyEndpoint, { headers, signal: AbortSignal.timeout(3000) })
+      const legacy = await fetch(legacyEndpoint, { headers, signal: AbortSignal.timeout(3000), redirect: 'error' })
       if (legacy.ok) return legacy.json()
-      const current = await fetch(new URL(`/api/session/${encodeURIComponent(id)}`, opencodeUrl), { headers, signal: AbortSignal.timeout(3000) })
+      const current = await fetch(new URL(`/api/session/${encodeURIComponent(id)}`, opencodeUrl), { headers, signal: AbortSignal.timeout(3000), redirect: 'error' })
       if (!current.ok) return {}
       const result = await current.json()
       return result.data ?? result

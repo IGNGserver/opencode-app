@@ -43,14 +43,16 @@ data class PermissionRequest(
   val toolMessageId: String = "",
   val toolCallId: String = ""
 )
-data class QuestionOption(val label: String, val description: String)
+data class SavedPermission(val id: String, val projectId: String, val action: String, val resource: String)
+data class QuestionOption(val label: String, val description: String, val value: String = label)
 data class QuestionPrompt(
   val title: String,
   val options: List<QuestionOption>,
   val multiple: Boolean,
-  val custom: Boolean = false
+  val custom: Boolean = false,
+  val field: String = ""
 )
-data class QuestionRequest(val id: String, val sessionId: String, val directory: String, val questions: List<QuestionPrompt>)
+data class QuestionRequest(val id: String, val sessionId: String, val directory: String, val questions: List<QuestionPrompt>, val form: Boolean = false)
 data class TodoItem(val content: String, val status: String, val priority: String)
 data class FileChange(
   val path: String,
@@ -171,12 +173,12 @@ internal fun JSONObject.toPermission(directory: String): PermissionRequest {
     arr("resources").length() > 0 -> arr("resources").toString()
     else -> obj("metadata").toString()
   }
-  val tool = obj("tool")
+  val tool = optJSONObject("tool") ?: obj("source")
   return PermissionRequest(
     str("id").ifBlank { str("requestID") }, str("sessionID"), directory,
     str("permission").ifBlank { str("action") }, detail,
-    (0 until arr("always").length()).mapNotNull { index -> arr("always").optString(index).takeIf(String::isNotBlank) },
-    tool.str("messageID"), tool.str("callID")
+    (optJSONArray("always") ?: arr("save")).let { values -> (0 until values.length()).mapNotNull { values.optString(it).takeIf(String::isNotBlank) } },
+    tool.str("messageID"), tool.str("callID").ifBlank { tool.str("id") }
   )
 }
 internal fun JSONObject.toQuestion(directory: String): QuestionRequest = QuestionRequest(
@@ -239,7 +241,7 @@ object TaskReducer {
             val tool = part.str("tool").ifBlank { part.str("name") }
             val phase = when {
               tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
-              tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(part.obj("state").obj("input").toString()) -> TaskPhase.TESTING
+              tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(part.obj("state").obj("input").str("command")) -> TaskPhase.TESTING
               else -> TaskPhase.TOOL
             }
             val state = part.obj("state")

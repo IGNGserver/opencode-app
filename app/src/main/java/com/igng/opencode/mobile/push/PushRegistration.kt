@@ -20,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import okhttp3.Credentials
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -68,11 +69,17 @@ class PushRegistration(private val context: Context) {
       .put("token", token)
       .toString()
       .toRequestBody(JSON)
-    post(profile, credentials, "v1/devices", body, "推送设备注册失败")
+    PushRevocations.serial.withLock {
+      check(PushRevocations(context).flushLocked(profile)) { "旧注册尚未撤销，稍后重试" }
+      // A Firebase callback may have arrived after deletion or a configuration edit.
+      if (ServerStore(context).profiles().none { it == profile && it.notifications }) return@withLock
+      require(profile.pluginSecret.isNotBlank()) { "请先配置独立的推送验证密钥" }
+      post(profile, credentials, "v1/devices", body, "推送设备注册失败")
+    }
   }
 
   /** Withdraws this device from the companion so a deleted profile stops receiving pushes before its
-   *  TTL expires (A08). Best-effort: a companion without the route returns 404/405 and is ignored. */
+   *  TTL expires (A08). Any failure remains in the durable withdrawal queue for retry. */
   suspend fun unregister(profile: ServerProfile, credentials: ServerCredentials, deviceId: String) = withContext(Dispatchers.IO) {
     if (profile.companionUrl.isBlank()) return@withContext
     val body = JSONObject()
@@ -80,11 +87,7 @@ class PushRegistration(private val context: Context) {
       .put("serverKey", profile.url.trimEnd('/'))
       .toString()
       .toRequestBody(JSON)
-    try {
-      post(profile, credentials, "v1/devices/unregister", body, "推送设备注销失败")
-    } catch (error: ApiException) {
-      if (error.status != 404 && error.status != 405) throw error
-    }
+    post(profile, credentials, "v1/devices/unregister", body, "推送设备注销失败")
   }
 
   private fun post(profile: ServerProfile, credentials: ServerCredentials, path: String, body: RequestBody, failure: String) {

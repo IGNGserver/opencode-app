@@ -387,26 +387,11 @@ fun ServersModal(
               val pair = PairLinkResolver.isPairLink(profile.url)
               val resolved = if (pair) PairLinkResolver.resolve(profile.url) else null
               val actualProfile = if (resolved == null) profile else profile.copy(url = resolved.serverUrl, username = resolved.credentials.username)
-              // Credentials only follow a profile when its address stays on the same origin: reusing
-              // the stored password/Cookie for a different host would send the old secret to a new
-              // target the user merely mistyped. Editing the URL therefore requires re-entering the
-              // password (the form already requires one for an existing profile).
-              val savedCredentials = controller.credentials(profile.id)
               val savedUrl = state.profiles.firstOrNull { it.id == profile.id }?.url
-              val sameOrigin = savedUrl.isNullOrBlank() || runCatching {
-                HttpOrigin.of(requireNotNull(profile.url.trimEnd('/').toHttpUrlOrNull())) ==
-                  HttpOrigin.of(requireNotNull(savedUrl.trimEnd('/').toHttpUrlOrNull()))
-              }.getOrDefault(false)
-              val carryPassword = password ?: savedCredentials.password.takeIf { sameOrigin }
-              val credentials = resolved?.credentials ?: ServerCredentials(
-                username = actualProfile.username,
-                password = carryPassword.orEmpty(),
-                cookie = if (sameOrigin) savedCredentials.cookie else ""
-              )
-              if (resolved == null && carryPassword.isNullOrEmpty()) error("服务器地址已更改，请重新输入访问密码")
+              val credentials = resolved?.credentials ?: profileCredentials(savedUrl, actualProfile.url,
+                controller.credentials(profile.id), actualProfile.username, password)
               val version = controller.testServer(actualProfile, credentials)
-              if (resolved == null) controller.saveServer(actualProfile, carryPassword, credentialUsername = actualProfile.username)
-              else controller.saveServer(actualProfile, resolved.credentials.password, resolved.credentials.cookie, resolved.credentials.username)
+              controller.saveServer(actualProfile, credentials.password, credentials.cookie, credentials.username)
               done("已连接 OpenCode $version")
               showForm = false
               editing = null
@@ -596,14 +581,14 @@ private fun ServerForm(
         TextField(
           value = pluginSecret,
           onValueChange = { pluginSecret = it },
-          label = { Text("推送校验密钥（OPENCODE_MOBILE_PLUGIN_SECRET）") },
+          label = { Text("推送验证密钥（OPENCODE_MOBILE_PUSH_SECRET）") },
           visualTransformation = PasswordVisualTransformation(),
           modifier = Modifier.fillMaxWidth(),
           singleLine = true
         )
       }
       item {
-        Text("填写与服务器 OPENCODE_MOBILE_PLUGIN_SECRET 相同的密钥，用于校验后台推送、防止伪造通知。留空则不做校验。",
+        Text("填写服务器独立的 OPENCODE_MOBILE_PUSH_SECRET。留空将拒绝后台推送；不要使用插件入站认证密钥。",
           style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
       item { SwitchRow("自动连接此服务器", autoConnect, { autoConnect = it }) }

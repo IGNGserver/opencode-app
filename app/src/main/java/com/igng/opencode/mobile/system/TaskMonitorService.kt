@@ -32,9 +32,9 @@ class TaskMonitorService : Service() {
   private val lastShown = HashMap<Pair<String, String>, Pair<TaskPhase, String>>()
   override fun onBind(intent: Intent?): IBinder? = null
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    val serverId = intent?.getStringExtra("serverId") ?: return START_NOT_STICKY
-    val sessionId = intent.getStringExtra("sessionId") ?: return START_NOT_STICKY
-    val profile = ServerStore(this).profiles().firstOrNull { it.id == serverId } ?: return START_NOT_STICKY
+    val serverId = intent?.getStringExtra("serverId") ?: run { stopSelf(); return START_NOT_STICKY }
+    val sessionId = intent.getStringExtra("sessionId") ?: run { stopSelf(); return START_NOT_STICKY }
+    val profile = ServerStore(this).profiles().firstOrNull { it.id == serverId } ?: run { stopSelf(); return START_NOT_STICKY }
     val notifications = TaskNotifications(this)
     tracked += serverId to sessionId
     // A dedicated monitoring notification; kept separate from per-session results so stopping the
@@ -43,7 +43,11 @@ class TaskMonitorService : Service() {
     if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, notifications.buildMonitoring(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     else startForeground(FOREGROUND_ID, notifications.buildMonitoring())
     val controller = MobileController.get(this)
-    if (controller.state.value.serverId != serverId) controller.connect(serverId)
+    if (controller.state.value.serverId != serverId || !profile.notifications) {
+      tracked.remove(serverId to sessionId)
+      if (tracked.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+      return START_NOT_STICKY
+    }
     if (monitor == null) {
       monitor = scope.launch {
         // Plain collect (not collectLatest): emissions are frequent during streaming, and cancelling
@@ -51,10 +55,13 @@ class TaskMonitorService : Service() {
         controller.state.collect { state ->
           tracked.toList().forEach { key ->
             val (trackedServerId, trackedSessionId) = key
-            // Only the currently connected server has live updates; tasks on other servers stay
-            // tracked in case the user switches back, but are not fabricated from another server's
-            // state (A09).
-            if (trackedServerId != state.serverId) return@forEach
+            // This service monitors only the current connection. Switching or removing a profile
+            // drops its local tracking; independent companion pushes remain available.
+            if (trackedServerId != state.serverId || state.profiles.none { it.id == trackedServerId && it.notifications } ||
+              state.connected && !state.degraded && state.sessions.none { it.id == trackedSessionId }) {
+              tracked.remove(key); lastShown.remove(key); notifications.cancelLocal(trackedServerId, trackedSessionId)
+              return@forEach
+            }
             val trackedProfile = state.profiles.firstOrNull { it.id == trackedServerId } ?: profile
             val session = state.sessions.firstOrNull { it.id == trackedSessionId } ?: Session(trackedSessionId, "", "OpenCode 任务", 0)
             val task = state.tasks[trackedSessionId] ?: return@forEach

@@ -10,18 +10,19 @@
 
 ## 稳定签名与产物
 
-- 正式发布必须使用受保护的稳定签名，否则无法覆盖升级已安装的版本。
-- 在仓库 Secrets 配置 `OPENCODE_MOBILE_KEYSTORE_FILE`（keystore 的绝对路径，通常由工作流先行写入 runner 临时目录）、`OPENCODE_MOBILE_KEYSTORE_PASSWORD`、`OPENCODE_MOBILE_KEY_ALIAS`、`OPENCODE_MOBILE_KEY_PASSWORD`。
-- 配齐后工作流构建 `:app:assembleRelease`（`isDebuggable=false`）并校验签名；未配齐时正式发布会直接失败。
-- 预发布在缺少上述 secrets 时回退到 debug 签名，并在 Release 说明中标注。
-- keystore 与密钥只存放在受保护的 Secrets 或密钥管理器中，不得进入仓库。
+- 预发布和正式版都必须使用同一套受保护的稳定签名，均构建非 debuggable 的 Release APK；CI 不允许调试证书或临时证书回退。
+- 仓库 Secrets：`OPENCODE_MOBILE_KEYSTORE_BASE64`、`OPENCODE_MOBILE_KEYSTORE_PASSWORD`、`OPENCODE_MOBILE_KEY_ALIAS`、`OPENCODE_MOBILE_KEY_PASSWORD`、`OPENCODE_MOBILE_SIGNING_CERT_SHA256`。最后一项是签名证书 SHA-256 指纹。工作流将 keystore 写入 runner 临时目录，构建后用 apksigner 验证实际证书。
+- 可选 `OPENCODE_MOBILE_FIREBASE_CONFIG_BASE64` 注入 Firebase Android 配置；不配置时仍可发布，但说明必须标注“不含 FCM”，仅填写服务器地址无法启用未编入的 FCM 能力。
+- 版本名来自 tag；版本码为 `1000 + GITHUB_RUN_NUMBER`。正常发布须按运行顺序完成，不得将旧 tag 重新构建为较新升级版本；工作流更名/计数重置前需迁移版本码基数。
+- 本地未配置 keystore 的 assembleRelease 仅用于编译验证，可能使用 debug 签名，不能作为发布产物。历史 debug 签名安装包无法用新稳定证书直接覆盖，应在目标设备验证迁移并事先保存服务器配置。
+- keystore、口令、Firebase 配置均不得进入仓库。CI 在成功或失败后清理注入文件。
 
 ## 发布流程
 
 1. 完成功能和验证，更新 `docs/releases/<tag>.md`。
 2. 提交变更并推送分支。
 3. 创建并推送版本 tag，或手动运行 `发布 OpenCode Mobile Release` 工作流。
-4. 工作流重新执行 Android 单元测试、Debug APK 构建和 companion 测试。
+4. 工作流重新执行 Android 单元测试、Release APK 构建和 companion 测试。
 5. 工作流把中文说明和 APK 一起发布到 GitHub Release。tag 触发默认是 pre-release；手动运行时只有选择 `release` 才会发布正式版。
 
 ## 说明模板

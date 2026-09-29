@@ -50,6 +50,7 @@ class TaskNotifications(private val context: Context) {
       this.action = name
       data = Uri.parse("opencode-mobile://action/${Uri.encode(profile.id)}/${Uri.encode(session.id)}/$name")
       putExtra("serverId", profile.id)
+      putExtra("profileUrl", profile.url)
       putExtra("sessionId", session.id)
       putExtra("directory", session.directory)
       permission?.let { putExtra("permissionId", it.id); putExtra("permissionDirectory", it.directory) }
@@ -83,12 +84,10 @@ class TaskNotifications(private val context: Context) {
       builder.setRequestPromotedOngoing(true)
       builder.addAction(0, "停止", action("abort", profile, session))
     }
-    if (state.phase == TaskPhase.WAITING_PERMISSION && permission != null) {
+    if (state.phase == TaskPhase.WAITING_PERMISSION && permission != null && permission.action.isNotBlank() && permission.detail !in setOf("", "{}", "[]")) {
       builder.addAction(0, "拒绝", action("reject", profile, session, permission))
       builder.addAction(0, "允许一次", action("once", profile, session, permission))
-      // Scope-neutral label: the client cannot verify whether "always" is remembered for the
-      // session, project or globally (A16).
-      builder.addAction(0, "始终允许", action("always", profile, session, permission))
+
     }
     if (state.phase == TaskPhase.WAITING_QUESTION) {
       builder.addAction(0, "回答", open(profile.id, session.id))
@@ -107,7 +106,7 @@ class TaskNotifications(private val context: Context) {
    *  from the per-session result notifications so removing the foreground state never removes a
    *  real task result. */
   fun buildMonitoring(): Notification = NotificationCompat.Builder(context, RUNNING)
-    .setSmallIcon(R.drawable.ic_app).setContentTitle("OpenCode 任务监控中").setContentText("正在后台跟踪任务状态")
+    .setSmallIcon(R.drawable.ic_app).setContentTitle("OpenCode 任务监控中").setContentText("仅跟踪当前服务器；切换后结束本地监控")
     .setOngoing(true).setShowWhen(false).setCategory(NotificationCompat.CATEGORY_SERVICE)
     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
     .build()
@@ -123,7 +122,11 @@ class TaskNotifications(private val context: Context) {
     if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
     manager.notify(notificationId, build(profile, session, state))
   }
-  fun cancel(serverId: String, sessionId: String) = manager.cancel(notificationId(serverId, sessionId))
+  fun cancelLocal(serverId: String, sessionId: String) = manager.cancel(notificationId(serverId, sessionId))
+  fun cancel(serverId: String, sessionId: String) {
+    manager.cancel(notificationId(serverId, sessionId))
+    manager.cancel(pushNotificationId(serverId, sessionId))
+  }
 }
 
 internal class XiaomiIslandAdapter(private val context: Context) {

@@ -40,6 +40,9 @@ class MainActivity : ComponentActivity() {
     val controller = MobileController.get(this)
     setContent {
       val state by controller.state.collectAsState()
+      val drafts = rememberSaveable(saver = androidx.compose.runtime.saveable.mapSaver(
+        save = { it.toMap() }, restore = { saved -> mutableStateMapOf<String, String>().apply { saved.forEach { (k, v) -> put(k, v as String) } } }
+      )) { mutableStateMapOf<String, String>() }
       val preferences = remember { getSharedPreferences("ui", MODE_PRIVATE) }
       var dark by remember { mutableStateOf(preferences.getBoolean("dark", false)) }
       var currentTab by rememberSaveable { mutableStateOf(RootTab.HOME) }
@@ -126,6 +129,7 @@ class MainActivity : ComponentActivity() {
                 ChatScreen(
                   state = state,
                   controller = controller,
+                  drafts = drafts,
                   onBack = { inChatDetail = false }
                 )
               } else {

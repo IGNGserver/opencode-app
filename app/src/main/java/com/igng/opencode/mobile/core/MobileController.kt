@@ -3,6 +3,7 @@ package com.igng.opencode.mobile.core
 import android.content.Context
 import com.igng.opencode.mobile.system.TaskNotifications
 import com.igng.opencode.mobile.system.TaskMonitorService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,6 +27,7 @@ data class MobileState(
   val connected: Boolean = false, val cached: Boolean = false, val loading: Boolean = false, val error: String? = null,
   /** True when the last catalog refresh could not read every project; some values are last-known. */
   val degraded: Boolean = false,
+  val staleDirectories: Set<String> = emptySet(), val streamConnected: Boolean = false,
   /** Non-error feedback (e.g. a share link); kept separate so it is not rendered as a failure. */
   val message: String? = null,
   val projects: List<Project> = emptyList(), val projectId: String? = null,
@@ -36,7 +38,8 @@ data class MobileState(
   val agents: List<AgentChoice> = emptyList(), val models: List<ModelChoice> = emptyList(), val commands: List<CommandChoice> = emptyList(),
   val agent: String? = null, val model: ModelChoice? = null,
   val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null, val fileBinary: Boolean = false,
-  val searchResults: List<String> = emptyList()
+  val searchResults: List<String> = emptyList(),
+  val supportsSavedPermissions: Boolean = false, val savedPermissions: List<SavedPermission>? = null
 ) {
   val server: ServerProfile? get() = profiles.firstOrNull { it.id == serverId }
   val project: Project? get() = projects.firstOrNull { it.id == projectId }
@@ -74,11 +77,14 @@ class MobileController private constructor(private val appContext: Context) {
   private var messageRefresh: Job? = null
   private var lastEventId = ""
   private val sendMutex = Mutex()
-  private val contentSearchMutex = Mutex()
-  private var searchQuery = ""
+  private var searchSequence = 0L
+  private var fileSequence = 0L
+  private var selectionRevision = 0L
+  private var catalogSequence = 0L
+  private var messageSequence = 0L
   private var reconcile: Job? = null
 
-  init { if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
+  init { com.igng.opencode.mobile.push.PushRevocations(appContext).retry(); if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
   fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
   fun deviceId(): String = store.deviceId()
   suspend fun testServer(profile: ServerProfile, credentials: ServerCredentials): String {
@@ -91,6 +97,11 @@ class MobileController private constructor(private val appContext: Context) {
   fun clearMessage() = mutable.update { it.copy(message = null) }
 
   fun saveServer(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null, connect: Boolean = true) {
+    val old = store.profiles().firstOrNull { it.id == profile.id }
+    if (old != null && old.companionUrl.isNotBlank() &&
+      (!profile.notifications || old.url != profile.url || old.companionUrl != profile.companionUrl || old.pluginSecret != profile.pluginSecret)) {
+      com.igng.opencode.mobile.push.PushRevocations(appContext).enqueue(old, store.credentials(old.id), store.deviceId())
+    }
     store.save(profile, password, cookie, credentialUsername)
     mutable.update { it.copy(profiles = store.profiles()) }
     if (connect) connect(profile.id)
@@ -108,14 +119,18 @@ class MobileController private constructor(private val appContext: Context) {
       api = null
       lastEventId = ""
     }
+    leaving?.let { com.igng.opencode.mobile.push.PushRevocations(appContext).enqueue(it, store.credentials(id), store.deviceId()) }
     store.delete(id)
     cache.delete(id)
-    leaving?.let { unregisterPush(it) }
-    mutable.update { MobileState(profiles = store.profiles(), serverId = store.profiles().firstOrNull()?.id) }
-    mutable.value.serverId?.let(::connect)
+
+    if (mutable.value.serverId == id) {
+      mutable.update { MobileState(profiles = store.profiles(), serverId = store.profiles().firstOrNull()?.id) }
+      mutable.value.serverId?.let(::connect)
+    } else mutable.update { it.copy(profiles = store.profiles()) }
   }
   fun connect(id: String) {
     val profile = store.profiles().firstOrNull { it.id == id } ?: return
+    val leaving = state.value.serverId?.takeIf { it != id && state.value.tasks.values.any { task -> task.active } }
     stream?.cancel()
     refresh?.cancel()
     eventRefresh?.cancel()
@@ -128,7 +143,7 @@ class MobileController private constructor(private val appContext: Context) {
     val rememberedProject = if (store.selectedId() == id) store.selectedProject() else null
     val rememberedSession = if (store.selectedId() == id) store.selectedSession() else null
     store.select(id, rememberedProject, rememberedSession)
-    mutable.update { MobileState(profiles = store.profiles(), serverId = id, loading = true) }
+    mutable.update { MobileState(profiles = store.profiles(), serverId = id, loading = true, message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     scope.launch {
       try {
         loadAll(token)
@@ -137,8 +152,9 @@ class MobileController private constructor(private val appContext: Context) {
           registerPushIfConfigured(profile)
         }
       } catch (error: Exception) {
+        if (error is CancellationException) throw error
         if (token != generation) return@launch
-        showOffline(id, error.message ?: "连接失败")
+        showOffline(id, token, error.message ?: "连接失败")
         // A refresh while offline must be able to recover: retry the connection with backoff instead
         // of leaving the user on a stale snapshot with no path back to a live stream (A10).
         scheduleReconnect(id, token)
@@ -160,24 +176,31 @@ class MobileController private constructor(private val appContext: Context) {
       loadAll(token)
       if (token != generation) return
       startStream(token)
-    } catch (_: Exception) {
-      if (token == generation) showOffline(id, "连接失败，正在重试")
+    } catch (error: Exception) {
+      if (error is CancellationException) throw error
+      if (token == generation) showOffline(id, token, "连接失败，正在重试")
       scheduleReconnect(id, token, attempt + 1)
     }
   }
-  private fun showOffline(id: String, reason: String) {
-    val snapshot = cache.catalog(id)
+  private suspend fun showOffline(id: String, token: Int, reason: String) {
+    val snapshot = kotlinx.coroutines.withContext(Dispatchers.IO) { cache.catalog(id) }
+    if (token != generation || state.value.serverId != id) return
     if (snapshot == null) mutable.update { it.copy(loading = false, connected = false, error = reason) }
     else {
       val (projects, sessions) = snapshot
       val sessionId = store.selectedSession()?.takeIf { selected -> sessions.any { it.id == selected } }
       mutable.update { it.copy(loading = false, connected = false, cached = true, error = "离线缓存：$reason",
         projects = projects, sessions = sessions, projectId = store.selectedProject() ?: projects.firstOrNull()?.id,
-        sessionId = sessionId, messages = sessionId?.let { selected -> cache.messages(id, selected) } ?: emptyList()) }
+        sessionId = sessionId, messages = emptyList()) }
+      if (sessionId != null) {
+        val messages = kotlinx.coroutines.withContext(Dispatchers.IO) { cache.messages(id, sessionId) }
+        if (token == generation && state.value.serverId == id && state.value.sessionId == sessionId) mutable.update { it.copy(messages = messages) }
+      }
     }
   }
   private suspend fun loadAll(token: Int, controlOnly: Boolean = false) {
     val client = api ?: return
+    val requestSequence = ++catalogSequence
     val version = client.health()
     val projects = client.projects()
     // Sessions, statuses, permissions and questions are independent per project; fetch them in
@@ -187,37 +210,38 @@ class MobileController private constructor(private val appContext: Context) {
     // permission or question read must not be mistaken for an authoritative "nothing to see", which
     // used to turn a running task into COMPLETED and silently clear pending approvals (A05).
     val sessionResults = coroutineScope {
-      projects.map { project -> async { project to runCatching { client.sessions(project.directory) } } }.awaitAll()
+      projects.map { project -> async { project to attempt { client.sessions(project.directory) } } }.awaitAll()
     }
     if (sessionResults.isNotEmpty() && sessionResults.all { it.second.isFailure }) throw sessionResults.first().second.exceptionOrNull()!!
     val failedSessionDirs = sessionResults.filter { it.second.isFailure }.map { it.first.directory }.toSet()
     val sessions = sessionResults.flatMap { it.second.getOrDefault(emptyList()) }.distinctBy { it.id }.sortedByDescending { it.updated }
     val statusResults = coroutineScope {
-      projects.map { project -> async { project.directory to runCatching { client.status(project.directory) } } }.awaitAll()
+      projects.map { project -> async { project.directory to attempt { client.status(project.directory) } } }.awaitAll()
     }
     val failedStatusDirs = statusResults.filter { it.second.isFailure }.map { it.first }.toSet()
     val statuses = statusResults.mapNotNull { it.second.getOrNull() }.flatMap { it.entries }.associate { it.key to it.value }
     val permissionResults = coroutineScope {
-      projects.map { project -> async { project.directory to runCatching { client.permissions(project.directory) } } }.awaitAll()
+      projects.map { project -> async { project.directory to attempt { client.permissions(project.directory) } } }.awaitAll()
     }
     val failedPermissionDirs = permissionResults.filter { it.second.isFailure }.map { it.first }.toSet()
     val permissions = permissionResults.mapNotNull { it.second.getOrNull() }.flatten().distinctBy { it.id }
     val questionResults = coroutineScope {
-      projects.map { project -> async { project.directory to runCatching { client.questions(project.directory) } } }.awaitAll()
+      projects.map { project -> async { project.directory to attempt { client.questions(project.directory) } } }.awaitAll()
     }
     val failedQuestionDirs = questionResults.filter { it.second.isFailure }.map { it.first }.toSet()
     val questions = questionResults.mapNotNull { it.second.getOrNull() }.flatten().distinctBy { it.id }
-    if (token != generation) return
+    if (token != generation || requestSequence != catalogSequence) return
     val degraded = failedSessionDirs + failedStatusDirs + failedPermissionDirs + failedQuestionDirs
     if (degraded.isNotEmpty()) Diagnostics.warn("MobileController", "部分数据读取失败，保留上次可信状态：$degraded")
-    mutable.value.serverId?.let { cache.saveCatalog(it, projects, sessions) }
+
     mutable.update { previous ->
       // A session whose project failed to report status keeps its previous phase; only an actual
       // authoritative status (or its absence from a successful response) may reduce it.
-      val degradedDirs = failedStatusDirs
+      val nextSessions = (sessions + previous.sessions.filter { it.directory in failedSessionDirs }).distinctBy { it.id }.sortedByDescending { it.updated }
+      val degradedDirs = failedStatusDirs + failedSessionDirs
       val states = mutableMapOf<String, TaskState>()
-      sessions.forEach { session ->
-        val authoritative = session.directory !in degradedDirs || failedStatusDirs.isEmpty()
+      nextSessions.forEach { session ->
+        val authoritative = session.directory !in degradedDirs
         val next = if (!authoritative) previous.tasks[session.id]
         else TaskReducer.status(session.id, statuses[session.id] ?: "idle", previous.tasks[session.id])
         if (next != null) states[session.id] = next
@@ -230,15 +254,15 @@ class MobileController private constructor(private val appContext: Context) {
       val nextQuestions = (questions + keptQuestions).distinctBy { it.id }
       nextPermissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previous.tasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
       nextQuestions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previous.tasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
-      val nextSessions = (sessions + previous.sessions.filter { it.directory in failedSessionDirs }).distinctBy { it.id }.sortedByDescending { it.updated }
-      previous.copy(version = version, protocol = client.detectedProtocol(), connected = true, cached = false, loading = false,
-        error = null, degraded = degraded.isNotEmpty(),
+      previous.copy(version = version, protocol = client.detectedProtocol(), supportsSavedPermissions = client.supportsSavedPermissions(), connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
+        error = null, degraded = degraded.isNotEmpty(), staleDirectories = degraded,
         projects = projects, sessions = nextSessions, tasks = states,
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject())?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
-        sessionId = (previous.sessionId ?: store.selectedSession())?.takeIf { id -> sessions.any { it.id == id } })
+        sessionId = (previous.sessionId ?: store.selectedSession())?.takeIf { id -> nextSessions.any { it.id == id } })
     }
     val current = mutable.value
+    current.serverId?.let { cache.saveCatalog(it, current.projects, current.sessions) }
     if (controlOnly) return
     current.project?.let { project -> loadChoices(project.directory, token) }
     current.session?.let { loadSession(it, token = token) }
@@ -262,10 +286,11 @@ class MobileController private constructor(private val appContext: Context) {
     stream = scope.launch {
       var retry = 1_000L
       while (isActive && token == generation) {
-          api?.events(lastEventId)?.catch { cause ->
-          if (token == generation) mutable.update { it.copy(connected = false, error = "实时连接断开，正在重连：${cause.message}", tasks = it.tasks.mapValues { (_, task) ->
-            if (task.active) task.copy(phase = TaskPhase.DISCONNECTED, detail = "连接已断开") else task
-          }) }
+          api?.events(lastEventId, onOpen = { scope.launch {
+            if (token == generation) mutable.update { it.copy(streamConnected = true) }
+          } })?.catch { cause ->
+            if (token == generation) mutable.update { it.copy(connected = false, streamConnected = false,
+              error = "实时连接断开，正在重连：${cause.message}") }
           }?.collect { event ->
             if (token == generation) {
               if (event.id.isNotBlank()) lastEventId = event.id
@@ -276,9 +301,10 @@ class MobileController private constructor(private val appContext: Context) {
             retry = 1_000L
         }
         if (isActive && token == generation) {
+          mutable.update { it.copy(streamConnected = false) }
           delay(retry)
           retry = (retry * 2).coerceAtMost(30_000L)
-          runCatching { loadAll(token) }
+          attempt { loadAll(token) }.onFailure { error -> if (token == generation) mutable.update { it.copy(connected = false, degraded = true, error = "重新同步失败：${error.message.orEmpty()}") } }
         }
       }
     }
@@ -294,7 +320,7 @@ class MobileController private constructor(private val appContext: Context) {
         // loop performs a full loadAll on every reconnect, so reconciling there would only fight the
         // disconnected state.
         if (token != generation || refresh?.isActive == true || !state.value.connected) continue
-        runCatching { loadAll(token, controlOnly = true) }
+        attempt { loadAll(token, controlOnly = true) }.onFailure { error -> if (token == generation) mutable.update { it.copy(degraded = true, error = "状态同步失败：${error.message}") } }
       }
     }
   }
@@ -304,14 +330,21 @@ class MobileController private constructor(private val appContext: Context) {
     val directory = event.directory.ifBlank { mutable.value.sessions.firstOrNull { it.id == sessionId }?.directory.orEmpty() }
     if (sessionId.isNotBlank()) {
       val before = mutable.value.tasks[sessionId]
-      val after = TaskReducer.event(sessionId, event.type, props, before)
+      var after = TaskReducer.event(sessionId, event.type, props, before)
       if (after != null) {
-        val pending = mutable.value.permissions.any { it.sessionId == sessionId } || mutable.value.questions.any { it.sessionId == sessionId }
-        if (!(after.phase == TaskPhase.COMPLETED && pending)) {
-          mutable.update { it.copy(tasks = it.tasks + (sessionId to after)) }
+        val resolved = props.str("requestID").ifBlank { props.str("id") }
+        val pendingPermission = mutable.value.permissions.any { it.sessionId == sessionId && !(event.type in setOf("permission.replied", "permission.rejected") && it.id == resolved) }
+        val pendingQuestion = mutable.value.questions.any { it.sessionId == sessionId && !(event.type in setOf("question.replied", "question.rejected") && it.id == resolved) }
+        val pending = pendingPermission || pendingQuestion
+        if (pending && after.phase !in setOf(TaskPhase.FAILED, TaskPhase.ABORTED)) after = TaskState(sessionId,
+          if (pendingPermission) TaskPhase.WAITING_PERMISSION else TaskPhase.WAITING_QUESTION,
+          if (pendingPermission) "等待权限确认" else "等待你的回答", before?.since ?: System.currentTimeMillis())
+        val next = after
+        if (!(next.phase == TaskPhase.COMPLETED && pending)) {
+          mutable.update { it.copy(tasks = it.tasks + (sessionId to next)) }
           val session = mutable.value.sessions.firstOrNull { it.id == sessionId }
           val profile = mutable.value.server
-          if (session != null && profile?.notifications == true && after.phase != before?.phase) notifications.show(profile, session, after,
+          if (session != null && profile?.notifications == true && next.phase != before?.phase) notifications.show(profile, session, next,
             mutable.value.permissions.firstOrNull { it.sessionId == sessionId })
         }
       }
@@ -383,7 +416,9 @@ class MobileController private constructor(private val appContext: Context) {
   }
   fun selectProject(id: String) {
     val project = mutable.value.projects.firstOrNull { it.id == id } ?: return
-    mutable.update { it.copy(projectId = id, sessionId = null, messages = emptyList(), agent = null, model = null) }
+    selectionRevision += 1
+    mutable.update { it.copy(projectId = id, sessionId = null, messages = emptyList(), agent = null, model = null,
+      files = emptyList(), searchResults = emptyList(), fileText = null, fileBinary = false) }
     store.rememberLocation(id, null)
     val token = generation
     scope.launch { loadChoices(project.directory, token) }
@@ -392,9 +427,9 @@ class MobileController private constructor(private val appContext: Context) {
     val client = api ?: return
     // Agents, models and commands are independent; one parallel round instead of three.
     val (agents, models, commands) = coroutineScope {
-      val agentsTask = async { runCatching { client.agents(directory) }.getOrDefault(emptyList()) }
-      val modelsTask = async { runCatching { client.models(directory) }.getOrDefault(emptyList()) }
-      val commandsTask = async { runCatching { client.commands(directory) }.getOrDefault(emptyList()) }
+      val agentsTask = async { attempt { client.agents(directory) }.getOrDefault(emptyList()) }
+      val modelsTask = async { attempt { client.models(directory) }.getOrDefault(emptyList()) }
+      val commandsTask = async { attempt { client.commands(directory) }.getOrDefault(emptyList()) }
       Triple(agentsTask.await(), modelsTask.await(), commandsTask.await())
     }
     if (token == generation && mutable.value.project?.directory == directory) {
@@ -403,14 +438,22 @@ class MobileController private constructor(private val appContext: Context) {
   }
   fun selectSession(id: String) {
     val session = mutable.value.sessions.firstOrNull { it.id == id } ?: return
+    selectionRevision += 1
     val project = mutable.value.projects.firstOrNull { it.directory == session.directory }
     val offline = mutable.value.cached && !mutable.value.connected
-    val messages = if (offline) mutable.value.serverId?.let { cache.messages(it, id) }.orEmpty() else emptyList()
+    val messages = emptyList<Message>()
     mutable.update { it.copy(projectId = project?.id ?: it.projectId, sessionId = id, messages = messages,
       todos = emptyList(), children = emptyList(), changes = emptyList(), files = emptyList(),
       searchResults = emptyList(), fileText = null, fileBinary = false) }
     store.rememberLocation(project?.id, id)
-    if (!offline) {
+    if (offline) {
+      val serverId = state.value.serverId ?: return
+      val revision = selectionRevision
+      scope.launch {
+        val cachedMessages = kotlinx.coroutines.withContext(Dispatchers.IO) { cache.messages(serverId, id) }
+        if (state.value.serverId == serverId && selectionRevision == revision) mutable.update { it.copy(messages = cachedMessages) }
+      }
+    } else {
       val token = generation
       // Choices and the session transcript are independent; run them concurrently.
       scope.launch { coroutineScope { launch { loadChoices(session.directory, token) }; loadSession(session, token = token) } }
@@ -418,25 +461,29 @@ class MobileController private constructor(private val appContext: Context) {
   }
   private suspend fun loadSession(session: Session, ancillary: Boolean = true, token: Int = generation, client: OpenCodeApi? = api) {
     val client = client ?: return
-    val messages = runCatching { client.messages(session.id, session.directory) }.getOrElse { error ->
-      val cached = mutable.value.serverId?.let { cache.messages(it, session.id) }.orEmpty()
-      if (token == generation) mutable.update { current -> current.copy(error = error.message, cached = cached.isNotEmpty()) }
-      if (cached.isEmpty()) return else cached
-    }
+    val serverId = state.value.serverId ?: return
+    val revision = selectionRevision
+    val requestSequence = ++messageSequence
+    fun current() = token == generation && revision == selectionRevision && state.value.sessionId == session.id && requestSequence == messageSequence
+    val result = attempt { client.messages(session.id, session.directory) }
     if (token != generation) return
-    mutable.value.serverId?.let { cache.saveMessages(it, session.id, messages) }
-    if (token != generation || mutable.value.sessionId != session.id) return
-    // A successful authoritative read supersedes the offline snapshot, so clear the stale flag.
-    mutable.update { it.copy(messages = messages, cached = false) }
+    val messages = result.getOrElse { error ->
+      val fallback = kotlinx.coroutines.withContext(Dispatchers.IO) { cache.messages(serverId, session.id) }
+      if (current()) mutable.update { it.copy(error = error.message, cached = true) }
+      if (fallback.isEmpty()) return else fallback
+    }
+    if (result.isSuccess) cache.saveMessages(serverId, session.id, messages)
+    if (!current()) return
+    mutable.update { it.copy(messages = messages, cached = result.isFailure) }
     if (ancillary) {
       // Todos, children and diff are independent; fetch in parallel (one round trip when connected).
       val (todos, children, changes) = coroutineScope {
-        val todosTask = async { runCatching { client.todos(session) }.getOrDefault(emptyList()) }
-        val childrenTask = async { runCatching { client.children(session) }.getOrDefault(emptyList()) }
-        val changesTask = async { runCatching { client.diff(session) }.getOrDefault(emptyList()) }
+        val todosTask = async { attempt { client.todos(session) }.getOrDefault(emptyList()) }
+        val childrenTask = async { attempt { client.children(session) }.getOrDefault(emptyList()) }
+        val changesTask = async { attempt { client.diff(session) }.getOrDefault(emptyList()) }
         Triple(todosTask.await(), childrenTask.await(), changesTask.await())
       }
-      if (token == generation && mutable.value.sessionId == session.id) mutable.update { it.copy(todos = todos, children = children, changes = changes,
+      if (current()) mutable.update { it.copy(todos = todos, children = children, changes = changes,
         sessions = (it.sessions + children).distinctBy { item -> item.id }.sortedByDescending { item -> item.updated }) }
     }
   }
@@ -448,124 +495,127 @@ class MobileController private constructor(private val appContext: Context) {
    * be committed while [isCurrent] still holds, so a request that was in flight when the user
    * switched server/project cannot write its result into the new context (A02).
    */
-  private data class OperationContext(val token: Int, val serverId: String, val client: OpenCodeApi) {
-    fun isCurrent(controller: MobileController): Boolean =
-      token == controller.generation && controller.state.value.serverId == serverId
+  private data class OperationContext(val token: Int, val serverId: String, val client: OpenCodeApi,
+    val revision: Long, val snapshot: MobileState) {
+    fun connectionCurrent(c: MobileController) = token == c.generation && c.state.value.serverId == serverId && c.api === client && c.state.value.server == snapshot.server
+    fun isCurrent(c: MobileController) = connectionCurrent(c) && revision == c.selectionRevision &&
+      c.state.value.projectId == snapshot.projectId && c.state.value.sessionId == snapshot.sessionId
   }
-
   private fun beginOperation(): OperationContext {
-    if (state.value.cached && !state.value.connected) error("离线缓存模式，重新连接后才能执行操作")
-    val serverId = state.value.serverId ?: error("请先连接服务器")
-    return OperationContext(generation, serverId, requireNotNull(api) { "请先连接服务器" })
+    val current = state.value
+    check(current.connected && !current.cached) { "数据尚未同步，请重新连接后操作" }
+    check(!current.degraded || current.project?.directory !in current.staleDirectories) { "当前项目状态尚未同步，请刷新后操作" }
+    return OperationContext(generation, current.serverId ?: error("请先连接服务器"),
+      requireNotNull(api) { "请先连接服务器" }, selectionRevision, current)
   }
-
-  /** Completes this operation only while its originating connection is still the active one. */
   private fun OperationContext.commit(update: (MobileState) -> MobileState) {
     if (isCurrent(this@MobileController)) mutable.update(update)
   }
-
+  private fun OperationContext.commitConnection(update: (MobileState) -> MobileState) {
+    if (connectionCurrent(this@MobileController)) mutable.update(update)
+  }
   fun createSession(title: String, onCreated: ((Session) -> Unit)? = null) = act { op ->
-    val project = state.value.project ?: error("先选择项目")
+    val project = op.snapshot.project ?: error("先选择项目")
     val session = op.client.createSession(project.directory, title)
-    op.commit { state -> state.copy(sessions = (listOf(session) + state.sessions).distinctBy { it.id }.sortedByDescending { it.updated }) }
-    if (!op.isCurrent(this)) return@act
-    selectSession(session.id)
-    onCreated?.invoke(session)
+    op.commitConnection { it.copy(sessions = (listOf(session) + it.sessions).distinctBy { s -> s.id }) }
+    if (op.isCurrent(this)) { selectSession(session.id); onCreated?.invoke(session) }
   }
   fun send(text: String, accepted: (() -> Unit)? = null) = act { op ->
-    // Only the guard-and-dispatch section is serialized; the follow-up transcript fetch runs outside
-    // the lock so a slow reload cannot block the next send.
-    val session = sendMutex.withLock {
-      val current = state.value.session ?: error("先打开会话")
-      if (state.value.tasks[current.id]?.active == true) error("当前会话仍在处理上一项任务")
-      val command = if (text.startsWith('/')) state.value.commands.firstOrNull { text.substringAfter('/').substringBefore(' ') == it.name } else null
-      if (command != null) op.client.command(current, command.name, text.substringAfter(' ', ""), state.value.agent, state.value.model)
-      else op.client.send(current, text, state.value.agent, state.value.model)
+    val session = op.snapshot.session ?: error("先打开会话")
+    sendMutex.withLock {
+      if (!op.isCurrent(this)) return@act
+      check(state.value.tasks[session.id]?.active != true) { "当前会话仍在处理上一项任务" }
+      val command = if (text.startsWith('/')) op.snapshot.commands.firstOrNull { text.substringAfter('/').substringBefore(' ') == it.name } else null
+      if (command != null) op.client.command(session, command.name, text.substringAfter(' ', ""), op.snapshot.agent, op.snapshot.model)
+      else op.client.send(session, text, op.snapshot.agent, op.snapshot.model)
       accepted?.invoke()
-      op.commit { it.copy(tasks = it.tasks + (current.id to TaskState(current.id, TaskPhase.THINKING, "任务已发送"))) }
-      current
+      op.commitConnection { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送"))) }
     }
-    // Monitoring is a user-visible notification contract; do not start it for a profile whose
-    // notifications are disabled (A09).
-    if (state.value.server?.notifications == true) TaskMonitorService.start(appContext, op.serverId, session.id)
-    loadSession(session, token = op.token, client = op.client, ancillary = false)
+    if (op.connectionCurrent(this) && op.snapshot.server?.notifications == true) TaskMonitorService.start(appContext, op.serverId, session.id)
+    if (op.isCurrent(this)) loadSession(session, token = op.token, client = op.client, ancillary = false)
   }
   fun abort() = withSession { op, client, session ->
     client.abort(session)
-    op.commit { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止"))) }
+    op.commitConnection { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止"))) }
   }
-  fun rename(title: String) = withSession { op, client, session -> client.renameSession(session, title); reload() }
+  fun rename(title: String) = withSession { op, client, session -> client.renameSession(session, title); if (op.connectionCurrent(this)) reload() }
   fun deleteSession() = withSession { op, client, session ->
     client.deleteSession(session)
-    // The session no longer exists; drop its offline copy so a later offline view cannot resurrect it.
     cache.deleteMessages(op.serverId, session.id)
     op.commit { it.copy(sessionId = null, messages = emptyList()) }
-    reload()
+    op.commitConnection { it.copy(sessions = it.sessions.filterNot { s -> s.id == session.id }, tasks = it.tasks - session.id) }
+    if (op.connectionCurrent(this)) reload()
   }
-  fun fork() = withSession { op, client, session -> op.client.forkSession(session) }
-  fun share() = withSession { op, client, session ->
-    val url = client.share(session)
-    op.commit { it.copy(message = "分享链接：$url") }
+  fun fork() = withSession { op, client, session ->
+    val fork = client.forkSession(session)
+    op.commitConnection { it.copy(sessions = (listOf(fork) + it.sessions).distinctBy { s -> s.id }) }
+    if (op.isCurrent(this)) selectSession(fork.id)
   }
-  fun unshare() = withSession { op, client, session -> client.unshare(session) }
-  fun summarize() = withSession { op, client, session -> client.summarize(session, state.value.model) }
+  fun share() = withSession { op, client, session -> val url = client.share(session); op.commit { it.copy(message = "分享链接：$url") } }
+  fun unshare() = withSession { _, client, session -> client.unshare(session) }
+  fun summarize() = withSession { op, client, session -> client.summarize(session, op.snapshot.model) }
   fun revert(messageId: String) = withSession { op, client, session ->
-    client.revert(session, messageId); loadSession(session, token = op.token, client = op.client)
+    client.revert(session, messageId); if (op.isCurrent(this)) loadSession(session, token = op.token, client = client)
   }
   fun unrevert() = withSession { op, client, session ->
-    client.unrevert(session); loadSession(session, token = op.token, client = op.client)
+    client.unrevert(session); if (op.isCurrent(this)) loadSession(session, token = op.token, client = client)
   }
   fun replyPermission(request: PermissionRequest, reply: String) = act { op ->
+    check(request in op.snapshot.permissions) { "权限请求已变化，请刷新" }
     op.client.replyPermission(request, reply)
-    op.commit { it.copy(permissions = it.permissions.filterNot { p -> p.id == request.id }) }
+    op.commitConnection { it.copy(permissions = it.permissions.filterNot { p -> p.id == request.id }) }
   }
-  /** Suspend form used by notification actions that must confirm with the server before dismissing;
-   *  unlike the [Job]-returning variant it propagates failure instead of writing state.error. */
-  suspend fun replyPermissionNow(requestId: String, sessionId: String, directory: String, reply: String) {
-    val op = beginOperation()
-    op.client.replyPermission(PermissionRequest(requestId, sessionId, directory, "", ""), reply)
-    op.commit { it.copy(permissions = it.permissions.filterNot { p -> p.id == requestId }) }
+  /** Notification execution uses its own immutable client. Only reconcile matching UI state. */
+  fun notificationCompleted(serverId: String) {
+    scope.launch { if (state.value.serverId == serverId) reload() }
   }
-  /** Reply to a permission straight from a system notification, keeping in-app state in sync. */
-  fun replyPermission(requestId: String, sessionId: String, directory: String, reply: String) =
-    act { replyPermissionNow(requestId, sessionId, directory, reply) }
-  /** Abort a session straight from a system notification, keeping in-app state in sync. The session
-   *  is routed with its real directory so a multi-project V1 server aborts the right task (A03). */
-  fun abortSession(sessionId: String, directory: String) = act { abortSessionNow(sessionId, directory) }
-  /** Suspend form used by notification actions; see [replyPermissionNow]. */
-  suspend fun abortSessionNow(sessionId: String, directory: String) {
-    val op = beginOperation()
-    op.client.abort(Session(sessionId, directory, "", 0))
-    op.commit { it.copy(tasks = it.tasks + (sessionId to TaskState(sessionId, TaskPhase.ABORTED, "任务已停止"))) }
-  }  fun replyQuestion(request: QuestionRequest, answers: List<List<String>>) = act { op ->
+  fun replyQuestion(request: QuestionRequest, answers: List<List<String>>) = act { op ->
+    check(request in op.snapshot.questions) { "问题已变化，请刷新" }
     op.client.replyQuestion(request, answers)
-    op.commit { it.copy(questions = it.questions.filterNot { q -> q.id == request.id }) }
+    op.commitConnection { it.copy(questions = it.questions.filterNot { q -> q.id == request.id }) }
   }
   fun rejectQuestion(request: QuestionRequest) = act { op ->
+    check(request in op.snapshot.questions) { "问题已变化，请刷新" }
     op.client.rejectQuestion(request)
-    op.commit { it.copy(questions = it.questions.filterNot { q -> q.id == request.id }) }
+    op.commitConnection { it.copy(questions = it.questions.filterNot { q -> q.id == request.id }) }
   }
-  fun listFiles(path: String = ".") = act { op ->
-    val directory = state.value.project?.directory ?: error("先选择项目")
-    val files = op.client.files(directory, path)
-    op.commit { it.copy(files = files, filePath = path, fileText = null, fileBinary = false) }
-  }
-  fun readFile(path: String) = act { op ->
-    val directory = state.value.project?.directory ?: error("先选择项目")
-    val content = op.client.fileContent(directory, path)
-    op.commit { it.copy(fileText = content.content.takeIf { value -> content.type != "binary" }, fileBinary = content.type == "binary", filePath = path) }
-  }
-  fun searchFiles(query: String) = act { op ->
-    val directory = state.value.project?.directory ?: error("先选择项目")
-    contentSearchMutex.withLock { searchQuery = query }
-    val results = op.client.searchFiles(directory, query)
-    // Latest-wins: a slow response for an older query must not overwrite a newer one.
-    contentSearchMutex.withLock {
-      if (op.isCurrent(this) && query == searchQuery) op.commit { it.copy(searchResults = results) }
+  fun listFiles(path: String = "."): Job {
+    val request = ++fileSequence
+    return act { op ->
+      val directory = op.snapshot.project?.directory ?: error("先选择项目")
+      val files = op.client.files(directory, path)
+      if (request == fileSequence) op.commit { it.copy(files = files, filePath = path, fileText = null, fileBinary = false) }
     }
   }
+  fun readFile(path: String): Job {
+    val request = ++fileSequence
+    return act { op ->
+      val directory = op.snapshot.project?.directory ?: error("先选择项目")
+      val content = op.client.fileContent(directory, path)
+      if (request == fileSequence) op.commit { it.copy(fileText = content.content.takeIf { content.type != "binary" }, fileBinary = content.type == "binary", filePath = path) }
+    }
+  }
+  fun searchFiles(query: String): Job {
+    val request = ++searchSequence
+    return act { op ->
+      val directory = op.snapshot.project?.directory ?: error("先选择项目")
+      val results = op.client.searchFiles(directory, query)
+      if (request == searchSequence) op.commit { it.copy(searchResults = results) }
+    }
+  }
+  fun loadSavedPermissions() = act { op ->
+    val project = op.snapshot.project ?: error("先选择项目")
+    val saved = op.client.savedPermissions(project.id)
+    op.commit { it.copy(savedPermissions = saved) }
+  }
+  fun closeSavedPermissions() = mutable.update { it.copy(savedPermissions = null) }
+  fun revokeSavedPermission(rule: SavedPermission) = act { op ->
+    check(rule in op.snapshot.savedPermissions.orEmpty())
+    op.client.revokePermission(rule.id)
+    op.commit { it.copy(savedPermissions = it.savedPermissions?.filterNot { old -> old.id == rule.id }) }
+  }
   fun registerPush(token: String) = act { op ->
-    val profile = state.value.server ?: error("先连接服务器")
+    val profile = op.snapshot.server ?: error("先连接服务器")
     com.igng.opencode.mobile.push.PushRegistration(appContext).register(profile, store.credentials(profile.id), token, store.deviceId())
   }
   /** Best-effort device (re-)registration whenever a push-configured profile connects, so token
@@ -576,32 +626,27 @@ class MobileController private constructor(private val appContext: Context) {
     if (!registration.available()) return
     com.google.firebase.messaging.FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
       scope.launch {
-        runCatching {
+        attempt {
           com.igng.opencode.mobile.push.PushRegistration(appContext).register(profile, store.credentials(profile.id), token, store.deviceId())
         }.onFailure { Diagnostics.warn("Push", "连接后自动注册设备失败", it) }
       }
     }
   }
-  private fun unregisterPush(profile: ServerProfile) {
-    if (profile.companionUrl.isBlank()) return
-    val deviceId = store.deviceId()
-    scope.launch {
-      runCatching { com.igng.opencode.mobile.push.PushRegistration(appContext).unregister(profile, store.credentials(profile.id), deviceId) }
-        .onFailure { Diagnostics.warn("Push", "注销设备失败，服务器可能在 TTL 前仍保留记录", it) }
-    }
-  }
   private fun withSession(block: suspend (OperationContext, OpenCodeApi, Session) -> Unit) = act { op ->
-    val session = state.value.session ?: error("先打开会话")
+    val session = op.snapshot.session ?: error("先打开会话")
     block(op, op.client, session)
   }
-  private fun act(block: suspend (OperationContext) -> Unit): Job = operationScope.launch {
-    val op = try { beginOperation() } catch (error: Exception) {
-      mutable.update { it.copy(error = error.message ?: "操作失败") }
-      return@launch
-    }
-    try { block(op) } catch (error: Exception) {
-      // Only surface an error for the server the user is still looking at.
-      if (op.isCurrent(this@MobileController)) mutable.update { it.copy(error = error.message ?: "操作失败") }
+  private fun act(block: suspend (OperationContext) -> Unit): Job {
+    // Capture before launching or waiting for a mutex, not when the coroutine resumes later.
+    val captured = attempt { beginOperation() }
+    return operationScope.launch {
+      val op = captured.getOrElse { error -> mutable.update { it.copy(error = error.message ?: "操作失败") }; return@launch }
+      try { block(op) } catch (cancel: CancellationException) { throw cancel } catch (error: Exception) {
+        if (op.isCurrent(this@MobileController)) mutable.update { it.copy(error = error.message ?: "操作失败") }
+      }
     }
   }
+  private inline fun <T> attempt(block: () -> T): Result<T> = try { Result.success(block()) }
+    catch (cancel: CancellationException) { throw cancel }
+    catch (error: Exception) { Result.failure(error) }
 }

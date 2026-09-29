@@ -1,14 +1,16 @@
 package com.igng.opencode.mobile.core
 
 import android.content.Context
+import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-class ServerStore(context: Context) {
-  private val preferences = context.getSharedPreferences("servers", Context.MODE_PRIVATE)
-  private val secrets = context.getSharedPreferences("secrets", Context.MODE_PRIVATE)
-  private val key = KeystoreCipher("opencode-mobile-server-passwords")
+class ServerStore internal constructor(private val preferences: SharedPreferences, private val secrets: SharedPreferences,
+  private val encryptValue: (String) -> String, private val decryptValue: (String) -> String) {
+  constructor(context: Context) : this(context.getSharedPreferences("servers", Context.MODE_PRIVATE),
+    context.getSharedPreferences("secrets", Context.MODE_PRIVATE),
+    KeystoreCipher("opencode-mobile-server-passwords")::encrypt, KeystoreCipher("opencode-mobile-server-passwords")::decrypt)
 
   fun profiles(): List<ServerProfile> = try {
     JSONArray(preferences.getString("profiles", "[]")).objects().map {
@@ -22,18 +24,27 @@ class ServerStore(context: Context) {
     emptyList()
   }
 
-  /** Shared HMAC key for companion push messages; a symmetric verification key, not a login secret.
-   *  Stored Keystore-encrypted at rest, with a transparent read of the legacy plaintext value (A07). */
+  /** Versioned encrypted value; failed decryption never becomes a new plaintext key. */
   fun pluginSecret(id: String): String {
-    val stored = preferences.getString("pluginSecret:$id", "") ?: ""
+    val stored = preferences.getString("pluginSecret:$id", "").orEmpty()
     if (stored.isBlank()) return ""
-    val decrypted = runCatching { key.decrypt(stored) }.getOrNull()
-    if (decrypted != null) return decrypted
-    // Legacy installs stored the key in cleartext; adopt it and rewrite encrypted.
-    if (stored.startsWith("{")) return ""
-    runCatching { preferences.edit().putString("pluginSecret:$id", key.encrypt(stored)).apply() }
-    return stored
+    val encrypted = stored.removePrefix("enc:v1:")
+    val value = runCatching { decryptValue(encrypted) }.getOrNull() ?: return ""
+    if (!stored.startsWith("enc:v1:")) preferences.edit().putString("pluginSecret:$id", "enc:v1:$encrypted").apply()
+    return value
   }
+
+  /** Persist acceptance before displaying; sequence is scoped to the server profile and session. */
+  fun acceptPush(id: String, session: String, sequence: Long, timestamp: Long): Boolean = synchronized(pushLock) {
+    val name = "pushSeen:$id:$session"
+    if (sequence <= preferences.getString(name, "0:0").orEmpty().substringBefore(':').toLongOrNull().let { it ?: 0L }) return false
+    val editor = preferences.edit().putString(name, "$sequence:$timestamp")
+    val cutoff = System.currentTimeMillis() - 86_400_000L
+    preferences.all.filter { (k, v) -> k.startsWith("pushSeen:") && k != name && (v as? String)?.substringAfter(':')?.toLongOrNull()?.let { it < cutoff } == true }
+      .keys.forEach(editor::remove)
+    editor.commit()
+  }
+  private companion object { val pushLock = Any() }
 
   fun selectedId(): String? = preferences.getString("selected", null)
   fun selectedProject(): String? = preferences.getString("selectedProject", null)
@@ -41,7 +52,8 @@ class ServerStore(context: Context) {
   fun deviceId(): String = preferences.getString("deviceId", null) ?: UUID.randomUUID().toString().also { preferences.edit().putString("deviceId", it).apply() }
 
   fun credentials(id: String): ServerCredentials {
-    val fallback = profiles().firstOrNull { it.id == id }?.username ?: "opencode"
+    val profile = profiles().firstOrNull { it.id == id }
+    val fallback = profile?.username ?: "opencode"
     return try {
       val raw = decrypt(id)
       when {
@@ -49,6 +61,7 @@ class ServerStore(context: Context) {
         !raw.trimStart().startsWith("{") -> ServerCredentials(fallback, raw)
         else -> {
           val json = JSONObject(raw)
+          if (json.has("origin") && (profile == null || json.str("origin") != credentialOrigin(profile.url))) return ServerCredentials(fallback)
           ServerCredentials(
             username = json.str("username").ifBlank { fallback },
             password = json.str("password"),
@@ -70,35 +83,27 @@ class ServerStore(context: Context) {
   }
 
   fun save(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null) {
-    // The secret is encrypted at rest; a blank value explicitly clears it so the user can revoke it
-    // instead of being stuck with a previously entered key.
-    if (profile.pluginSecret.isBlank()) preferences.edit().remove("pluginSecret:${profile.id}").apply()
-    else runCatching { preferences.edit().putString("pluginSecret:${profile.id}", key.encrypt(profile.pluginSecret)).apply() }
-      .onFailure { Diagnostics.warn("ServerStore", "推送密钥加密失败", it) }
+    val previousProfile = profiles().firstOrNull { it.id == profile.id }
+    val previousCredentials = credentials(profile.id)
+    val next = profileCredentials(previousProfile?.url, profile.url, previousCredentials,
+      credentialUsername ?: profile.username, password, cookie)
+    // Encrypt everything before mutating either store. Credentials carry their own origin, so a
+    // crash between these two preference commits can only cause a missing login, never a leak.
+    val encoded = if (next.password.isEmpty() && next.cookie.isEmpty()) null else encryptValue(JSONObject()
+      .put("origin", credentialOrigin(profile.url)).put("username", next.username).put("password", next.password).put("cookie", next.cookie).toString())
+    val pushKey = profile.pluginSecret.takeIf { it.isNotBlank() }?.let { "enc:v1:" + encryptValue(it) }
     val updated = profiles().filterNot { it.id == profile.id } + profile
     val json = JSONArray().apply { updated.forEach { item -> put(JSONObject()
       .put("id", item.id).put("name", item.name).put("url", item.url).put("username", item.username)
       .put("autoConnect", item.autoConnect).put("notifications", item.notifications).put("companionUrl", item.companionUrl)
       .put("allowCleartext", item.allowCleartext)) } }
-    preferences.edit().putString("profiles", json.toString()).apply()
-    if (password != null || cookie != null || credentialUsername != null) {
-      val previous = credentials(profile.id)
-      val next = ServerCredentials(
-        username = credentialUsername ?: previous.username.ifBlank { profile.username },
-        password = password ?: previous.password,
-        cookie = cookie ?: previous.cookie
-      )
-      if (next.password.isEmpty() && next.cookie.isEmpty()) secrets.edit().remove(profile.id).apply()
-      else encrypt(profile.id, JSONObject().put("username", next.username).put("password", next.password).put("cookie", next.cookie).toString())
-    }
+    check(secrets.edit().putString(profile.id, encoded).commit()) { "无法保存凭据，请重试" }
+    check(preferences.edit().putString("profiles", json.toString()).putString("pluginSecret:${profile.id}", pushKey).commit()) { "无法保存服务器资料，请重试" }
   }
   private fun decrypt(id: String): String? = try {
     val value = secrets.getString(id, null) ?: return null
-    key.decrypt(value)
+    decryptValue(value)
   } catch (_: Exception) { null }
-  private fun encrypt(id: String, value: String) {
-    secrets.edit().putString(id, key.encrypt(value)).apply()
-  }
   fun delete(id: String) {
     val json = JSONArray().apply { profiles().filterNot { it.id == id }.forEach { item ->
       put(JSONObject().put("id", item.id).put("name", item.name).put("url", item.url)

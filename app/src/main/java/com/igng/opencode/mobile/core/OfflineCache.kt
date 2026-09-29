@@ -1,6 +1,7 @@
 package com.igng.opencode.mobile.core
 
 import android.content.Context
+import android.content.SharedPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -9,16 +10,21 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
-class OfflineCache(context: Context) {
-  private val preferences = context.getSharedPreferences("offline_cache", Context.MODE_PRIVATE)
-  private val cipher = KeystoreCipher("opencode-mobile-offline-cache")
-  private val writes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+class OfflineCache internal constructor(
+  private val preferences: SharedPreferences,
+  private val encrypt: (String) -> String,
+  private val decrypt: (String) -> String,
+  private val writes: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+) {
+  constructor(context: Context) : this(context.getSharedPreferences("offline_cache", Context.MODE_PRIVATE),
+    KeystoreCipher("opencode-mobile-offline-cache")::encrypt, KeystoreCipher("opencode-mobile-offline-cache")::decrypt)
   private val pendingLock = Any()
   private val pending = LinkedHashMap<String, () -> String>()
   // Monotonic sequence per key. A write is committed only while it is still the newest intent for
   // that key, so a batch that was dequeued before a delete (or a newer write) is discarded instead of
   // resurrecting data the user removed (A14).
   private val nameSequence = HashMap<String, Long>()
+  private val inFlight = mutableSetOf<String>()
   private var sequence = 0L
   private val index = ArrayList<String>()
   private var writer: Job? = null
@@ -31,16 +37,15 @@ class OfflineCache(context: Context) {
   private fun touchIndex(name: String) {
     index.remove(name)
     index.add(name)
-    while (index.size > MAX_ENTRIES) evict(index.first())
+    while (index.isNotEmpty() && (index.size > MAX_ENTRIES || cacheBytes() > MAX_TOTAL_BYTES)) evict(index.first())
     pruneSequences()
     persistIndex()
   }
   /** Keeps [nameSequence] from growing with every session ever opened. */
+  private fun cacheBytes(): Long = preferences.all.filterKeys { it.startsWith(CATALOG_PREFIX) || it.startsWith(MESSAGES_PREFIX) }
+    .values.sumOf { (it as? String)?.length?.times(2L) ?: 0L }
   private fun pruneSequences() {
-    if (nameSequence.size <= MAX_ENTRIES * 2) return
-    val live = index.toHashSet()
-    live += pending.keys
-    nameSequence.keys.retainAll(live)
+    nameSequence.keys.retainAll(index.toSet() + pending.keys + inFlight)
   }
   private fun evict(name: String) {
     index.remove(name)
@@ -62,7 +67,7 @@ class OfflineCache(context: Context) {
     // applies to an upgraded install.
     preferences.all.keys.filter { it.startsWith(CATALOG_PREFIX) || it.startsWith(MESSAGES_PREFIX) }
       .filterNot(index::contains).forEach { index.add(it) }
-    while (index.size > MAX_ENTRIES) evict(index.first())
+    while (index.isNotEmpty() && (index.size > MAX_ENTRIES || cacheBytes() > MAX_TOTAL_BYTES)) evict(index.first())
     if (index.isNotEmpty()) persistIndex()
   }
   // Serialization and AES-GCM encryption of large transcripts are CPU-bound. Queue them on a
@@ -77,33 +82,34 @@ class OfflineCache(context: Context) {
     }
   }
   private suspend fun drainWrites() {
-    try {
-      while (true) {
-        val batch: Map<String, Pair<() -> String, Long>> = synchronized(pendingLock) {
-          if (pending.isEmpty()) {
-            writer = null
-            return
-          }
-          pending.mapValues { (name, produce) -> produce to (nameSequence[name] ?: 0L) }.also { pending.clear() }
-        }
-        for ((name, entry) in batch) {
-          val (produce, captured) = entry
-          // Superseded by a newer write or a delete while this batch was being encrypted.
-          val stillCurrent = synchronized(pendingLock) { (nameSequence[name] ?: 0L) <= captured }
-          if (!stillCurrent) continue
-          // Serialization and AES-GCM encryption both happen here, off the UI thread.
-          preferences.edit().putString(name, cipher.encrypt(produce())).apply()
-          synchronized(pendingLock) { touchIndex(name) }
+    while (true) {
+      val batch = synchronized(pendingLock) {
+        if (pending.isEmpty()) { writer = null; return }
+        pending.mapValues { (name, produce) -> produce to nameSequence.getValue(name) }.also {
+          inFlight.addAll(it.keys); pending.clear()
         }
       }
-    } catch (_: Exception) {
-      // A failed write must not wedge the drain loop; the next enqueue restarts it.
-      synchronized(pendingLock) { writer = null }
+      for ((name, entry) in batch) {
+        try {
+          val (produce, captured) = entry
+          val encoded = encrypt(produce())
+          synchronized(pendingLock) {
+            // Validation and commit share the delete lock. Encryption may finish after a deletion;
+            // only the exact still-live write intent can reach preferences.
+            if (nameSequence[name] == captured && encoded.length * 2L <= MAX_ENTRY_BYTES) {
+              preferences.edit().putString(name, encoded).apply()
+              touchIndex(name)
+            }
+          }
+        } catch (error: Exception) { Diagnostics.warn("OfflineCache", "缓存写入失败", error) }
+        finally { synchronized(pendingLock) { inFlight.remove(name); pruneSequences() } }
+      }
     }
   }
+  internal suspend fun awaitWrites() { while (true) { val job = synchronized(pendingLock) { writer } ?: return; job.join() } }
   private fun read(name: String): String? = try {
     val encoded = preferences.getString(name, null) ?: return null
-    cipher.decrypt(encoded)
+    decrypt(encoded)
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "读取 $name 失败", error)
     null
@@ -155,7 +161,7 @@ class OfflineCache(context: Context) {
   }
   fun delete(serverId: String) {
     synchronized(pendingLock) {
-      val matches = (index + preferences.all.keys).filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.toSet()
+      val matches = (index + preferences.all.keys + pending.keys + inFlight + nameSequence.keys).filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.toSet()
       matches.forEach { name ->
         pending.remove(name)
         nextSequence(name)
@@ -183,5 +189,7 @@ class OfflineCache(context: Context) {
     const val CATALOG_PREFIX = "catalog:"
     const val MESSAGES_PREFIX = "messages:"
     const val MAX_ENTRIES = 150
+    const val MAX_TOTAL_BYTES = 16_000_000L
+    const val MAX_ENTRY_BYTES = 2_000_000L
   }
 }
