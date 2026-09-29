@@ -148,18 +148,29 @@ jobs:
             exit 1
           fi
           test -n "$EXPECTED_CERT" || { echo "缺少固定证书指纹" >&2; exit 1; }
-          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
-          if [[ -z "$actual" ]]; then
+          expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "发布配置的 SHA-256 指纹格式无效" >&2
+            exit 1
+          fi
+          actual_digests=$(sed -nE 's/^.*certificate SHA-256 digest: ([0-9A-Fa-f:]+)$/\1/p' signing.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          if [[ -z "$actual_digests" ]]; then
             echo "无法从 apksigner 输出解析证书 SHA-256 指纹" >&2
             cat signing.txt >&2
             exit 1
           fi
-          expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
-          if [[ "$actual" != "$expected" ]]; then
-            echo "签名证书与发布配置不匹配" >&2
-            echo "产物证书 SHA-256：$actual" >&2
-            exit 1
-          fi
+          while IFS= read -r actual; do
+            if [[ ! "$actual" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "apksigner 返回无效的证书 SHA-256 指纹" >&2
+              cat signing.txt >&2
+              exit 1
+            fi
+            if [[ "$actual" != "$expected" ]]; then
+              echo "签名证书与发布配置不匹配" >&2
+              echo "产物证书 SHA-256：$actual" >&2
+              exit 1
+            fi
+          done <<< "$actual_digests"
           echo "签名及非调试产物检查通过"
 
       - name: 发布 GitHub Release
