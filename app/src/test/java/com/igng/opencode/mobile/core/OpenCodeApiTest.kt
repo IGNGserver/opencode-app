@@ -289,6 +289,39 @@ class OpenCodeApiTest {
     assertFalse(HttpOrigin.allowsCleartext("10.0.0.5"))
   }
 
+  /** V2 detection must not abort when the older `api/health` path is absent. */
+  @Test fun detectsV2ThroughInfoWhenHealthPathIsGone() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404)) // global/health (V1 probe)
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health (older V2)
+      server.enqueue(MockResponse().setBody("""{"version":"2.0"}""")) // api/info (current V2)
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      assertEquals("OpenCode V2", api.health())
+      assertEquals(ServerProtocol.V2, api.detectedProtocol())
+      server.takeRequest()
+      server.takeRequest()
+      assertEquals("/api/info", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
+  /** V2 unrevert falls back to the current DELETE .../revert when revert/clear is absent. */
+  @Test fun v2UnrevertFallsBackToDeleteRevert() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setResponseCode(404))
+      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+      server.enqueue(MockResponse().setResponseCode(404)) // revert/clear
+      server.enqueue(MockResponse().setResponseCode(204)) // DELETE revert
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      api.health()
+      api.unrevert(Session("ses-1", "/repo", "Task", 0))
+      server.takeRequest(); server.takeRequest()
+      assertEquals("/api/session/ses-1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
+      val fallback = server.takeRequest()
+      assertEquals("DELETE", fallback.method)
+      assertEquals("/api/session/ses-1/revert", fallback.requestUrl?.encodedPath)
+    }
+  }
+
   @Test fun pushSignatureMatchesCompanionVector() {
     val v1 = mapOf(
       "sessionId" to "ses-1", "serverId" to "srv-1", "phase" to "WAITING_PERMISSION",

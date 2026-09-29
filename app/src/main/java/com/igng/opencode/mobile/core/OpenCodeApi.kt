@@ -243,11 +243,7 @@ class OpenCodeApi(
       if (!response.optBoolean("healthy")) throw IOException("OpenCode 服务未就绪")
       return response.str("version")
     }
-    if (protocol == ServerProtocol.V2) {
-      val response = obj("api/health")
-      if (!response.optBoolean("healthy") && !response.has("pid")) throw IOException("OpenCode 服务未就绪")
-      return "OpenCode V2"
-    }
+    if (protocol == ServerProtocol.V2) return v2Health()
     try {
       val legacy = obj("global/health")
       if (!legacy.optBoolean("healthy")) throw IOException("OpenCode 服务未就绪")
@@ -256,9 +252,26 @@ class OpenCodeApi(
     } catch (error: ApiException) {
       if (error.status != 404) throw error
     }
-    val current = obj("api/health")
-    if (!current.optBoolean("healthy") && !current.has("pid")) throw IOException("OpenCode 服务未就绪")
+    val version = v2Health()
     protocol = ServerProtocol.V2
+    return version
+  }
+
+  /**
+   * V2 health probe. Older V2 revisions exposed `api/health`; the current published V2 API exposes
+   * `api/info`. Trying the older path first and falling back on 404 keeps both revisions connectable
+   * (previously a 404 here aborted the whole connection).
+   */
+  private suspend fun v2Health(): String {
+    try {
+      val response = obj("api/health")
+      if (!response.optBoolean("healthy") && !response.has("pid")) throw IOException("OpenCode 服务未就绪")
+      return "OpenCode V2"
+    } catch (error: ApiException) {
+      if (error.status != 404) throw error
+    }
+    // A responding info endpoint means the server is up; the body shape is version-specific.
+    obj("api/info")
     return "OpenCode V2"
   }
   suspend fun projects(): List<Project> = when (ensureProtocol()) {
@@ -352,7 +365,13 @@ class OpenCodeApi(
   suspend fun unrevert(session: Session) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "session/${segment(session.id)}/unrevert", session.directory)
-      ServerProtocol.V2 -> request("POST", "api/session/${segment(session.id)}/revert/clear")
+      ServerProtocol.V2 -> try {
+        request("POST", "api/session/${segment(session.id)}/revert/clear")
+      } catch (error: ApiException) {
+        // The current V2 API clears the revert stage with DELETE .../revert.
+        if (error.status != 404) throw error
+        request("DELETE", "api/session/${segment(session.id)}/revert")
+      }
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }

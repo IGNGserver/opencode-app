@@ -35,20 +35,29 @@
 - 仍待验证：`Last-Event-ID` 的服务端重放语义。当前发布的 V2 OpenAPI 未在 `/api/event` 描述重放行为，仅 SSE 帧带 `id`；客户端已不强依赖重放（靠周期对账兜底）。
 - 建议：在目标实例上做事件 ID 重放/乱序/正常关闭验收后，再决定是否依赖服务端重放。
 
-## 5. V2 契约与当前发布 OpenAPI 的差异（需目标实例确认）
+## 5. V2 契约与当前发布 OpenAPI 的差异（已做安全回退，其余需目标实例确认）
 
-核对 `https://opencode.ai/v2/openapi.json` 后发现应用内 V2 适配与当前发布规范存在多处不一致。**没有贸然改动**，因为无法确认设备实际连接的是否为当前 V2（应用的 V2 健康检查路径 `api/health` 也不在规范内，规范为 `/api/info`）。这些应在拿到目标实例 `/openapi.json` 或 `/doc` 快照后逐项核对：
+核对 `https://opencode.ai/v2/openapi.json`（OpenCode V2 的权威规范）后发现应用内 V2 适配与当前发布规范存在多处不一致。对**无歧义的路径级差异**加了向后兼容回退；对会改变请求体语义、可能被服务端"忽略未知字段"而静默失败的差异**没有贸然改动**，因为无法确认设备实际连接的是哪个 V2 修订。
+
+已加兼容回退（新增性，不改变旧修订行为）：
+
+| 位置 | 处理 |
+|---|---|
+| V2 health | 先试旧 `GET api/health`，404 时回退当前 `GET /api/info`。此前 `api/health` 404 会让连接直接失败 |
+| V2 unrevert | 先试旧 `POST .../revert/clear`，404 时回退当前 `DELETE /api/session/{id}/revert` |
+
+仍待目标实例确认（未改）：
 
 | 位置 | 应用当前 | 当前发布规范 | 风险 |
 |---|---|---|---|
-| V2 health | `GET api/health`（看 `healthy`/`pid`） | `GET /api/info` | 若目标为当前 V2，健康检查可能失败 |
-| V2 权限回复体 | `POST .../permission/{id}/reply` body `{reply}` | body `{decision: once|always|reject}`，`additionalProperties:false` | 当前 V2 下回复可能 400 |
-| V2 unrevert | `POST api/session/{id}/revert/clear` | `DELETE /api/session/{sessionID}/revert` 或 `POST .../revert/commit` | 路径不存在 |
-| V2 问题 | `api/question/request`、`.../question/{id}/reply|reject` | 规范无 question，使用 `session/{id}/form`/`form/{id}/reply` | 问题交互在 V2 可能不可用 |
+| V2 发送消息体 | `POST .../prompt` body `{prompt:{text}}` | body `{text, files, agents, ...}` | 若为当前 V2，发送可能 400 或静默失败 |
+| V2 权限回复体 | body `{reply}` | body `{decision: once\|always\|reject}`，`additionalProperties:false` | 当前 V2 下回复可能 400 |
+| V2 问题 | `api/question/request`、`.../question/{id}/reply\|reject` | 规范无 question，使用 `session/{id}/form`/`form/{id}/reply` | 问题交互在 V2 可能不可用 |
 | 权限 source | 读 `source.callID` | 字段为 `source.id` | `toolCallId` 恒为空 |
+| 权限回复作用域 | 无 | `always` 生成项目级 `PermissionSaved.Info`，可 `GET/DELETE /api/permission/saved` | 见第 1 节 |
 
-- 本轮已做：把范围中立的权限文案与保存规则预览落地；未改上述路径与请求体。
-- 建议：以目标实例契约为准统一 V2 适配；若要兼容多个 V2 修订，采用"规范形状优先、失败回退旧形状"的显式策略并加目标实例测试。
+- 本轮已做：权限文案范围中立化 + 保存规则预览；health 与 unrevert 的兼容回退；其余保持原状并记录。
+- 建议：以目标实例 `/openapi.json` 快照为准逐项核对；发送体与权限回复体建议采用"规范形状优先、失败回退旧形状"的显式策略并加目标实例契约测试；form/question 差异需要先确认语义再实现。
 
 ## 6. 无法在本机验收的边界（证据缺口，非代码缺陷）
 
@@ -69,4 +78,5 @@
 - `:app:assembleRelease`：通过，产物 `app-release.apk` 非 debuggable（未配置生产 keystore 时回退 debug 签名，正式发布由工作流阻断）。
 - `:app:lintDebug`：BUILD SUCCESSFUL，0 Error。
 - `cd companion && node --test`：8/8 通过。
-- 新增回归测试覆盖：跨源重定向零请求（REST 与配对）、请求取消即时生效、v2 推送签名绑定目录/设备/新鲜度、companion 落盘失败拒绝、失败投递重试、设备注销、插件 toolKind 投影、契约 V2 tool 用例、离线/降级状态标志。
+- 新增回归测试覆盖：跨源重定向零请求（REST 与配对）、请求取消即时生效、v2 推送签名绑定目录/设备/新鲜度、companion 落盘失败拒绝、失败投递重试、设备注销、插件 toolKind 投影、契约 V2 tool 用例、离线/降级状态标志、V2 经 `api/info` 检测、V2 unrevert 回退。
+- Gradle 依赖验证元数据已用全新依赖缓存（`GRADLE_USER_HOME` 隔离 + `--rerun-tasks`）验证 debug/test/lint/release 全部通过，确认清单完整。
