@@ -26,6 +26,14 @@
 4. 工作流重新执行 Android 单元测试、Release APK 构建和 companion 测试。
 5. 工作流把中文说明和 APK 一起发布到 GitHub Release。tag 触发默认是 pre-release；手动运行时只有选择 `release` 才会发布正式版。
 
+## Release 说明与产物命名
+
+- GitHub Release 的正文由工作流自动组装，顺序为：版本标题、发布类型说明、推送变体、`## 本次更新`、`## 下载`、`## 自动验证`。
+- `## 本次更新` 的正文取自 `docs/releases/<tag>.md`（去掉文件开头的 `## 本次更新` 标题）。
+- `## 下载` 由工作流生成，包含 Android 安装包的直链：`https://github.com/<owner>/<repo>/releases/download/<tag>/OpenCode-Mobile-<version>.apk`。
+- Android 安装包的上传文件名固定为 `OpenCode-Mobile-<version>.apk`（`<version>` 为去掉 `v` 前缀的 tag，例如 `v0.1.0-rc.5` → `OpenCode-Mobile-0.1.0-rc.5.apk`），不再是固定的 `app-release.apk`。Gradle 仍按默认路径产出 `app-release.apk`，工作流在校验签名后复制并重命名后上传。
+- 因为直链里写死了文件名和 tag，改名或改版本号会破坏旧链接；如需变更命名规则，应作为独立迁移处理。
+
 ## 说明模板
 
 ```markdown
@@ -41,3 +49,5 @@
 
 - 列出尚未在真实设备、真实 OpenCode Server 或推送服务上验证的部分。
 ```
+
+工作流会把 `## 本次更新` 及之后的内容原样拼进 Release 正文，并额外追加「下载」直链和「自动验证」小节，因此说明文件不需要自己写安装包名称或下载链接。
