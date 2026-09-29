@@ -1,16 +1,20 @@
 package com.igng.opencode.mobile.ui
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -37,6 +41,10 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
 
+private enum class HomeFilter(val label: String) {
+  ALL("全部"), RUNNING("运行中"), WAITING("待处理"), RECENT("历史")
+}
+
 @Composable
 fun HomeScreen(
   state: MobileState,
@@ -55,7 +63,7 @@ fun HomeScreen(
       when (phase) {
         in TaskState.RUNNING_PHASES -> running += session
         in TaskState.WAITING_PHASES -> waiting += session
-        else -> if (recent.size < 8) recent += session
+        else -> if (recent.size < 12) recent += session
       }
     }
     Triple(running, waiting, recent)
@@ -64,20 +72,24 @@ fun HomeScreen(
   val waiting = sections.second
   val recent = sections.third
 
+  // 首要焦点任务 (正在运行或需要审批的任务置顶聚焦)
+  val heroSession = waiting.firstOrNull() ?: running.firstOrNull()
+  val heroTask = heroSession?.let { state.tasks[it.id] }
+
+  var selectedFilter by remember { mutableStateOf(HomeFilter.ALL) }
+
   LazyColumn(
     modifier = Modifier
       .fillMaxSize()
       .overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
+    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp)
   ) {
-    // 状态提示条：降级或离线缓存
+    // 状态提示：离线或降级
     if (state.degraded || state.cached) {
       item {
         Card(
-          colors = CardDefaults.defaultColors(
-            color = MiuixColorTokens.WarningSubtle
-          ),
+          colors = CardDefaults.defaultColors(color = MiuixColorTokens.WarningSubtle),
           insideMargin = PaddingValues(14.dp)
         ) {
           Row(verticalAlignment = Alignment.CenterVertically) {
@@ -89,8 +101,8 @@ fun HomeScreen(
             )
             Spacer(Modifier.width(10.dp))
             Text(
-              text = if (state.degraded) "部分服务器数据读取失败，相关状态可能为上一次已知值。"
-                     else "当前处于离线缓存模式，重新连接后将自动恢复同步。",
+              text = if (state.degraded) "部分服务器数据未能成功同步，相关显示可能为上一次已知值。"
+                     else "当前处于离线离网模式，恢复连接后将自动同步。",
               style = MiuixTheme.textStyles.body2.copy(color = MiuixColorTokens.Warning)
             )
           }
@@ -98,127 +110,271 @@ fun HomeScreen(
       }
     }
 
-    // 指标概览区域：采用 MIUIX 风格卡片网格
+    // 1. 焦点看板 Hero Area (心智第一位：用户进 App 第一眼看它)
+    item {
+      if (heroSession != null && heroTask != null) {
+        val isWaiting = heroTask.phase in TaskState.WAITING_PHASES
+        Card(
+          modifier = Modifier.fillMaxWidth(),
+          pressFeedbackType = PressFeedbackType.Sink,
+          showIndication = true,
+          cornerRadius = 20.dp,
+          insideMargin = PaddingValues(18.dp),
+          colors = CardDefaults.defaultColors(
+            color = if (isWaiting) MiuixColorTokens.WarningSubtle else MiuixTheme.colorScheme.surfaceContainer
+          ),
+          onClick = { onOpen(heroSession.id) }
+        ) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Box(
+              modifier = Modifier
+                .background(
+                  if (isWaiting) MiuixColorTokens.Warning else MiuixColorTokens.Primary,
+                  miuixSquircleShape(8.dp)
+                )
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+              Text(
+                text = if (isWaiting) "需要你处理" else "正在运行",
+                style = MiuixTheme.textStyles.footnote2.copy(
+                  color = Color.White,
+                  fontWeight = FontWeight.Bold
+                )
+              )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+              text = "当前焦点任务",
+              style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            )
+            Spacer(Modifier.weight(1f))
+            MiuixStatePill(heroTask.phase)
+          }
+
+          Spacer(Modifier.height(10.dp))
+          Text(
+            text = heroSession.title,
+            style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.Bold),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+          )
+          Spacer(Modifier.height(6.dp))
+          Text(
+            text = heroTask.detail.ifBlank { if (isWaiting) "正在等待权限审批或选项确认" else "正在执行后台逻辑…" },
+            style = MiuixTheme.textStyles.body2.copy(
+              color = if (isWaiting) MiuixColorTokens.Warning else MiuixTheme.colorScheme.onSurfaceVariantSummary
+            ),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+          )
+
+          Spacer(Modifier.height(14.dp))
+          if (!isWaiting) {
+            InfiniteProgressIndicator(
+              modifier = Modifier.fillMaxWidth().height(4.dp)
+            )
+          } else {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.End
+            ) {
+              Button(
+                onClick = { onOpen(heroSession.id) },
+                colors = ButtonDefaults.buttonColorsPrimary()
+              ) {
+                Text("立即进入处理 →")
+              }
+            }
+          }
+        }
+      } else {
+        // 空闲状态：极简智能开工舱
+        Card(
+          modifier = Modifier.fillMaxWidth(),
+          pressFeedbackType = PressFeedbackType.Sink,
+          showIndication = true,
+          cornerRadius = 20.dp,
+          insideMargin = PaddingValues(18.dp),
+          colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainer),
+          onClick = {
+            if (state.connected) {
+              controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "") { onOpen(it.id) }
+            } else {
+              onServers()
+            }
+          }
+        ) {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+              modifier = Modifier
+                .size(48.dp)
+                .background(MiuixColorTokens.PrimarySubtle, miuixSquircleShape(14.dp)),
+              contentAlignment = Alignment.Center
+            ) {
+              Icon(
+                imageVector = MiuixIcons.Add,
+                contentDescription = "开启任务",
+                tint = MiuixTheme.colorScheme.primary,
+                modifier = Modifier.size(26.dp)
+              )
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+              Text(
+                text = if (state.connected) "智能开工舱" else "连接 OpenCode",
+                style = MiuixTheme.textStyles.headline1.copy(fontWeight = FontWeight.Bold)
+              )
+              Spacer(Modifier.height(3.dp))
+              Text(
+                text = if (state.connected) "目录 [${state.project?.name ?: "默认工程"}] · 点击立刻开启新开发会话"
+                       else "添加远程工作站以开始协同开发",
+                style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+              )
+            }
+            Icon(
+              imageVector = MiuixIcons.ChevronForward,
+              contentDescription = null,
+              tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
+              modifier = Modifier.size(18.dp)
+            )
+          }
+        }
+      }
+    }
+
+    // 2. 指标状态漏斗与可点击过滤器 (交互式分段选择)
     item {
       Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
       ) {
-        MetricTile("运行中", running.size.toString(), MiuixColorTokens.Primary, Modifier.weight(1f))
-        MetricTile("待处理", waiting.size.toString(), MiuixColorTokens.Warning, Modifier.weight(1f))
-        MetricTile("全部会话", state.sessions.size.toString(), MiuixColorTokens.Success, Modifier.weight(1f))
+        InteractiveMetricTile(
+          label = "运行中",
+          count = running.size,
+          color = MiuixColorTokens.Primary,
+          selected = selectedFilter == HomeFilter.RUNNING,
+          onClick = { selectedFilter = if (selectedFilter == HomeFilter.RUNNING) HomeFilter.ALL else HomeFilter.RUNNING },
+          modifier = Modifier.weight(1f)
+        )
+        InteractiveMetricTile(
+          label = "待处理",
+          count = waiting.size,
+          color = MiuixColorTokens.Warning,
+          selected = selectedFilter == HomeFilter.WAITING,
+          onClick = { selectedFilter = if (selectedFilter == HomeFilter.WAITING) HomeFilter.ALL else HomeFilter.WAITING },
+          modifier = Modifier.weight(1f)
+        )
+        InteractiveMetricTile(
+          label = "历史任务",
+          count = recent.size,
+          color = MiuixColorTokens.Success,
+          selected = selectedFilter == HomeFilter.RECENT,
+          onClick = { selectedFilter = if (selectedFilter == HomeFilter.RECENT) HomeFilter.ALL else HomeFilter.RECENT },
+          modifier = Modifier.weight(1f)
+        )
       }
     }
 
-    // 快捷开始新任务卡片 (带按压反馈)
-    item {
-      Card(
-        modifier = Modifier.fillMaxWidth(),
-        pressFeedbackType = PressFeedbackType.Sink,
-        showIndication = true,
-        insideMargin = PaddingValues(16.dp),
-        onClick = {
-          if (state.connected) {
-            controller.createSession(if (state.protocol.supportsTitleOnCreate) "新任务" else "") { onOpen(it.id) }
-          } else {
-            onServers()
+    // 3. 动态任务流列表 (根据筛选器丝滑展开)
+    when (selectedFilter) {
+      HomeFilter.ALL -> {
+        if (waiting.isNotEmpty()) {
+          item { MiuixSectionHeader("需要立即处理", waiting.size) }
+          items(waiting, key = { "waiting-${it.id}" }) { session ->
+            ActionRequiredCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
           }
         }
-      ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Box(
-            modifier = Modifier
-              .size(44.dp)
-              .background(MiuixColorTokens.PrimarySubtle, miuixSquircleShape(12.dp)),
-            contentAlignment = Alignment.Center
-          ) {
-            Icon(
-              imageVector = MiuixIcons.Add,
-              contentDescription = "新建",
-              tint = MiuixTheme.colorScheme.primary,
-              modifier = Modifier.size(24.dp)
-            )
+
+        if (running.isNotEmpty()) {
+          item { MiuixSectionHeader("正在执行的任务", running.size) }
+          items(running, key = { "running-${it.id}" }) { session ->
+            TaskExecutionCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
           }
-          Spacer(Modifier.width(14.dp))
-          Column(Modifier.weight(1f)) {
-            Text(
-              text = if (state.connected) "开启新任务" else "添加并连接服务器",
-              style = MiuixTheme.textStyles.headline1.copy(fontWeight = FontWeight.SemiBold)
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-              text = if (state.connected) "项目 [${state.project?.name ?: "默认目录"}] · 一键唤起智能工作流"
-                     else "连接私有 OpenCode 服务以开始协作",
-              style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis
-            )
+        }
+
+        item {
+          MiuixSectionHeader("最近会话", recent.size, action = "查看全部", onAction = onSessions)
+        }
+        if (recent.isEmpty()) {
+          item { MiuixEmptyStateCard("暂无历史记录", "开启新任务后将在此保留开发记录。") }
+        } else {
+          items(recent, key = { "recent-${it.id}" }) { session ->
+            MiuixSessionItemCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
           }
-          Icon(
-            imageVector = MiuixIcons.ChevronForward,
-            contentDescription = null,
-            tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
-            modifier = Modifier.size(16.dp)
-          )
         }
       }
-    }
-
-    // 运行中任务
-    item { MiuixSectionHeader("正在运行", running.size) }
-    if (running.isEmpty()) {
-      item { MiuixEmptyStateCard("目前无运行中的任务", "发送开发任务或启动 Agent 后，实时状态与进展将在此呈现。") }
-    } else {
-      items(running, key = { "running-${it.id}" }) { session ->
-        TaskExecutionCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
+      HomeFilter.RUNNING -> {
+        item { MiuixSectionHeader("运行中任务", running.size) }
+        if (running.isEmpty()) {
+          item { MiuixEmptyStateCard("无正在运行的任务", "当前没有任何 Agent 正在执行。") }
+        } else {
+          items(running, key = { "filter-running-${it.id}" }) { session ->
+            TaskExecutionCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
+          }
+        }
       }
-    }
-
-    // 待处理任务 (权限与交互)
-    item { MiuixSectionHeader("需要处理", waiting.size) }
-    if (waiting.isEmpty()) {
-      item { MiuixEmptyStateCard("没有待处理事项", "环境权限审批与关键问题提问将在此置顶显示。") }
-    } else {
-      items(waiting, key = { "waiting-${it.id}" }) { session ->
-        ActionRequiredCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
+      HomeFilter.WAITING -> {
+        item { MiuixSectionHeader("待审批与交互", waiting.size) }
+        if (waiting.isEmpty()) {
+          item { MiuixEmptyStateCard("一切就绪", "当前没有需要权限审批或选项回答的任务。") }
+        } else {
+          items(waiting, key = { "filter-waiting-${it.id}" }) { session ->
+            ActionRequiredCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
+          }
+        }
       }
-    }
-
-    // 最近会话列表
-    item {
-      MiuixSectionHeader("最近会话", recent.size, action = "查看全部", onAction = onSessions)
-    }
-    if (recent.isEmpty()) {
-      item { MiuixEmptyStateCard("暂无历史会话", "创建新任务后将在此保留历史记录。") }
-    } else {
-      items(recent, key = { "recent-${it.id}" }) { session ->
-        MiuixSessionItemCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
+      HomeFilter.RECENT -> {
+        item { MiuixSectionHeader("历史任务记录", recent.size, action = "全部列表", onAction = onSessions) }
+        if (recent.isEmpty()) {
+          item { MiuixEmptyStateCard("暂无记录", "历史开发会话将归档于此。") }
+        } else {
+          items(recent, key = { "filter-recent-${it.id}" }) { session ->
+            MiuixSessionItemCard(session, state.tasks[session.id], onClick = { onOpen(session.id) })
+          }
+        }
       }
     }
   }
 }
 
 @Composable
-private fun MetricTile(label: String, value: String, accentColor: Color, modifier: Modifier = Modifier) {
+private fun InteractiveMetricTile(
+  label: String,
+  count: Int,
+  color: Color,
+  selected: Boolean,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier
+) {
   Card(
     modifier = modifier,
-    insideMargin = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+    pressFeedbackType = PressFeedbackType.Sink,
+    showIndication = true,
+    cornerRadius = 14.dp,
+    insideMargin = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
     colors = CardDefaults.defaultColors(
-      color = MiuixTheme.colorScheme.surfaceContainer
-    )
+      color = if (selected) color.copy(alpha = 0.15f) else MiuixTheme.colorScheme.surfaceContainer
+    ),
+    onClick = onClick
   ) {
     Text(
-      text = value,
+      text = "$count",
       style = MiuixTheme.textStyles.title2.copy(
         fontWeight = FontWeight.Bold,
-        color = accentColor
+        color = color
       )
     )
     Spacer(Modifier.height(2.dp))
     Text(
       text = label,
       style = MiuixTheme.textStyles.footnote2.copy(
-        color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+        color = if (selected) color else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
       )
     )
   }
@@ -228,6 +384,7 @@ private fun MetricTile(label: String, value: String, accentColor: Color, modifie
 fun MiuixEmptyStateCard(title: String, subtitle: String) {
   Card(
     modifier = Modifier.fillMaxWidth(),
+    cornerRadius = 16.dp,
     insideMargin = PaddingValues(20.dp),
     colors = CardDefaults.defaultColors(
       color = MiuixTheme.colorScheme.surfaceContainer
@@ -236,7 +393,7 @@ fun MiuixEmptyStateCard(title: String, subtitle: String) {
     Text(
       text = title,
       style = MiuixTheme.textStyles.headline2.copy(
-        fontWeight = FontWeight.Medium,
+        fontWeight = FontWeight.SemiBold,
         color = MiuixTheme.colorScheme.onSurface
       )
     )
@@ -256,6 +413,7 @@ private fun TaskExecutionCard(session: Session, task: TaskState?, onClick: () ->
     modifier = Modifier.fillMaxWidth(),
     pressFeedbackType = PressFeedbackType.Sink,
     showIndication = true,
+    cornerRadius = 16.dp,
     insideMargin = PaddingValues(16.dp),
     onClick = onClick
   ) {
@@ -278,9 +436,9 @@ private fun TaskExecutionCard(session: Session, task: TaskState?, onClick: () ->
       maxLines = 2,
       overflow = TextOverflow.Ellipsis
     )
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(10.dp))
     InfiniteProgressIndicator(
-      modifier = Modifier.fillMaxWidth().height(4.dp)
+      modifier = Modifier.fillMaxWidth().height(3.dp)
     )
   }
 }
@@ -291,6 +449,7 @@ private fun ActionRequiredCard(session: Session, task: TaskState?, onClick: () -
     modifier = Modifier.fillMaxWidth(),
     pressFeedbackType = PressFeedbackType.Sink,
     showIndication = true,
+    cornerRadius = 16.dp,
     insideMargin = PaddingValues(16.dp),
     colors = CardDefaults.defaultColors(
       color = MiuixColorTokens.WarningSubtle
@@ -299,17 +458,15 @@ private fun ActionRequiredCard(session: Session, task: TaskState?, onClick: () -
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
       Column(Modifier.weight(1f)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Text(
-            text = session.title,
-            style = MiuixTheme.textStyles.headline1.copy(fontWeight = FontWeight.SemiBold),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-          )
-        }
+        Text(
+          text = session.title,
+          style = MiuixTheme.textStyles.headline1.copy(fontWeight = FontWeight.SemiBold),
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis
+        )
         Spacer(Modifier.height(4.dp))
         Text(
-          text = task?.detail ?: "需要你的权限授权或选项回答",
+          text = task?.detail ?: "需要你的操作授权或回答提问",
           style = MiuixTheme.textStyles.footnote1.copy(
             color = MiuixColorTokens.Warning,
             fontWeight = FontWeight.Medium
@@ -339,7 +496,8 @@ fun MiuixSessionItemCard(session: Session, task: TaskState?, onClick: () -> Unit
     modifier = Modifier.fillMaxWidth(),
     pressFeedbackType = PressFeedbackType.Sink,
     showIndication = true,
-    insideMargin = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+    cornerRadius = 14.dp,
+    insideMargin = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     onClick = onClick
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -350,7 +508,7 @@ fun MiuixSessionItemCard(session: Session, task: TaskState?, onClick: () -> Unit
           maxLines = 1,
           overflow = TextOverflow.Ellipsis
         )
-        Spacer(Modifier.height(3.dp))
+        Spacer(Modifier.height(2.dp))
         Text(
           text = session.directory.substringAfterLast('/'),
           style = MiuixTheme.textStyles.footnote2.copy(
@@ -361,7 +519,7 @@ fun MiuixSessionItemCard(session: Session, task: TaskState?, onClick: () -> Unit
       Column(horizontalAlignment = Alignment.End) {
         if (task != null && task.phase != TaskPhase.IDLE) {
           MiuixStatePill(task.phase)
-          Spacer(Modifier.height(4.dp))
+          Spacer(Modifier.height(3.dp))
         }
         Text(
           text = formatDate(session.updated),
@@ -405,8 +563,7 @@ fun SessionsScreen(
     .filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
 
   Column(Modifier.fillMaxSize()) {
-    // 搜索框与项目过滤栏
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
       TextField(
         value = query,
         onValueChange = { text: String -> query = text },
@@ -424,7 +581,7 @@ fun SessionsScreen(
       )
 
       if (state.projects.isNotEmpty()) {
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         val projectTabs = listOf("全部项目") + state.projects.map { it.name }
         val selectedIdx = if (state.projectId == null) 0 else (state.projects.indexOfFirst { it.id == state.projectId } + 1).coerceAtLeast(0)
         TabRow(
@@ -442,7 +599,7 @@ fun SessionsScreen(
       modifier = Modifier
         .fillMaxSize()
         .overScrollVertical(),
-      contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),
+      contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
       if (visible.isEmpty()) {
@@ -456,7 +613,6 @@ fun SessionsScreen(
     }
   }
 
-  // V1 兼容标题弹窗
   if (createDialog) {
     SuperDialog(
       title = "新建会话",
@@ -850,7 +1006,7 @@ fun SettingsScreen(
     modifier = Modifier
       .fillMaxSize()
       .overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
+    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp)
   ) {
     item { MiuixSectionHeader("当前连接") }
@@ -892,13 +1048,13 @@ fun SettingsScreen(
       }
     }
 
-    item { MiuixSectionHeader("通知与实时岛") }
+    item { MiuixSectionHeader("通知与超级岛") }
     item {
       Card(insideMargin = PaddingValues(16.dp)) {
         Text("系统通知与灵动岛 / 超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
         Spacer(Modifier.height(4.dp))
         Text(
-          "支持 Android 实时进度条与小米 HyperOS 超级岛 / 流体胶囊显示。",
+          "支持 Android 实时进度条与小米 HyperOS 超级岛 / 流体胶囊展示。",
           style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
         )
         Spacer(Modifier.height(10.dp))
@@ -920,7 +1076,7 @@ fun SettingsScreen(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-          "若希望完全关闭 App 后仍能及时收到任务完成或权限等待通知，需配置伴随插件 companion 与 Firebase 凭据。",
+          "若希望完全退出应用后仍能收到任务完成或权限等待通知，需配置伴随插件 companion 与 Firebase 凭据。",
           style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
         )
         Spacer(Modifier.height(10.dp))

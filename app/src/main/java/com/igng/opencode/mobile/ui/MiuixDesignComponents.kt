@@ -1,9 +1,16 @@
 package com.igng.opencode.mobile.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -13,24 +20,27 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.mobile.core.TaskPhase
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
 /**
  * MIUIX 语义色彩系统：
- * 主色采用小米 HyperOS 官方经典科技蓝 #3482FF，
- * 搭配精准的状态与层级语义色，替代原有 Fluent 颜色。
+ * 主色采用小米 HyperOS 官方经典科技蓝 #3482FF，搭配全套层次色阶。
  */
 object MiuixColorTokens {
   val Primary = Color(0xFF3482FF)
   val PrimaryVariant = Color(0xFF277AF7)
-  val PrimarySubtle = Color(0x1A3482FF)
+  val PrimarySubtle = Color(0x1F3482FF)
 
   val Success = Color(0xFF34C759)
   val Warning = Color(0xFFFF9500)
   val Error = Color(0xFFF04438)
   val Info = Color(0xFF007AFF)
 
-  // 状态背景微色
+  // 状态背景柔色
   val SuccessSubtle = Color(0x1F34C759)
   val WarningSubtle = Color(0x1FFFF9500)
   val ErrorSubtle = Color(0x1FF04438)
@@ -40,7 +50,7 @@ object MiuixColorTokens {
 
 /**
  * MIUIX 风格状态胶囊 (State Badge / Pill)
- * 采用连续曲率胶囊形态与精准的语义色圆点指示器
+ * 采用连续曲率胶囊形态与语义呼吸圆点
  */
 @Composable
 fun MiuixStatePill(
@@ -95,7 +105,7 @@ fun MiuixStatePill(
 }
 
 /**
- * MIUIX 规范分节标题 (SmallTitle)
+ * MIUIX 规范分节标题 (Section Title)
  */
 @Composable
 fun MiuixSectionHeader(
@@ -130,10 +140,10 @@ fun MiuixSectionHeader(
       )
     }
     if (action != null && onAction != null) {
-      top.yukonga.miuix.kmp.basic.TextButton(
+      TextButton(
         text = action,
         onClick = onAction,
-        colors = top.yukonga.miuix.kmp.basic.ButtonDefaults.textButtonColorsPrimary()
+        colors = ButtonDefaults.textButtonColorsPrimary()
       )
     }
   }

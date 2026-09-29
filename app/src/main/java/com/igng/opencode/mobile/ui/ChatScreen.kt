@@ -7,7 +7,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +24,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.mobile.core.*
+import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.extra.SuperDialog
@@ -467,6 +467,8 @@ private fun MiuixExpandableCard(title: String, content: String, defaultOpen: Boo
   var open by remember(title, content.take(30)) { mutableStateOf(defaultOpen) }
   Card(
     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    pressFeedbackType = PressFeedbackType.Sink,
+    showIndication = true,
     cornerRadius = 12.dp,
     insideMargin = PaddingValues(0.dp),
     colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
@@ -711,9 +713,18 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: MobileController) {
           verticalAlignment = Alignment.CenterVertically
         ) {
           if (question.multiple) {
-            Checkbox(checked = option.value in answers[index], onCheckedChange = null)
+            Checkbox(checked = option.value in answers[index], onCheckedChange = { isChecked ->
+              answers = answers.toMutableList().also { list ->
+                list[index] = if (isChecked) list[index] + option.value else list[index] - option.value
+              }
+            })
           } else {
-            RadioButton(selected = option.value in answers[index], onClick = null)
+            RadioButton(selected = option.value in answers[index], onClick = {
+              answers = answers.toMutableList().also { list ->
+                list[index] = listOf(option.value)
+              }
+              custom = custom.toMutableList().also { it[index] = "" }
+            })
           }
           Spacer(Modifier.width(10.dp))
           Column {
@@ -760,7 +771,7 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: MobileController) {
 }
 
 /**
- * 搭载 Liquid Glass 增强材料的对话输入舱 (Composer)
+ * 搭载 Liquid Glass 悬浮质感的对话输入舱 (Composer Dock)
  */
 @Composable
 private fun MiuixLiquidComposer(
@@ -784,12 +795,12 @@ private fun MiuixLiquidComposer(
   Column(
     modifier = Modifier
       .fillMaxWidth()
-      .padding(horizontal = 12.dp, vertical = 6.dp)
+      .padding(horizontal = 14.dp, vertical = 6.dp)
       .navigationBarsPadding()
   ) {
     if (!state.connected) {
       Text(
-        "离线模式 · 连接后恢复交互",
+        "离线模式 · 重新连接后将恢复交互",
         color = MiuixColorTokens.Warning,
         style = MiuixTheme.textStyles.footnote2,
         modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
@@ -797,7 +808,7 @@ private fun MiuixLiquidComposer(
     }
     if (waiting) {
       Text(
-        "请先审批上方的操作或问题",
+        "请先审批上方的操作请求或回答问题",
         color = MiuixColorTokens.Warning,
         style = MiuixTheme.textStyles.footnote2,
         modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
@@ -821,12 +832,12 @@ private fun MiuixLiquidComposer(
       LiquidActionCapsule("🧠 " + (state.model?.label ?: "默认模型")) { modelSheet = true }
     }
 
-    // 输入舱核心 Surface (应用 Liquid Glass 质感)
+    // 输入舱核心 Surface (液态玻璃质感)
     LiquidGlassSurface(
       modifier = Modifier.fillMaxWidth(),
-      cornerRadius = 20.dp
+      cornerRadius = 22.dp
     ) {
-      Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+      Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
         Box(Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 130.dp)) {
           if (draft.isEmpty()) {
             Text(
@@ -1162,7 +1173,9 @@ private fun FilesPanel(
           Text("引用到对话")
         }
         Button(
-          onClick = { clipboard.setText(AnnotatedString(state.fileText ?: "")) },
+          onClick = {
+            clipboard.setText(AnnotatedString(state.fileText ?: ""))
+          },
           colors = ButtonDefaults.buttonColors()
         ) {
           Text("复制全文")
