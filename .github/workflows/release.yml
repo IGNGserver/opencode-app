@@ -138,13 +138,22 @@ jobs:
             echo "发布产物不应是 debuggable：$apk" >&2
             exit 1
           fi
-          "$build_tools/apksigner" verify --print-certs "$apk" > signing.txt
+          if ! "$build_tools/apksigner" verify --print-certs "$apk" > signing.txt 2>&1; then
+            echo "apksigner 无法验证发布 APK" >&2
+            cat signing.txt >&2
+            exit 1
+          fi
           if grep -q "CN=Android Debug" signing.txt; then
             echo "正式版不能使用调试签名" >&2
             exit 1
           fi
           test -n "$EXPECTED_CERT" || { echo "缺少固定证书指纹" >&2; exit 1; }
           actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          if [[ -z "$actual" ]]; then
+            echo "无法从 apksigner 输出解析证书 SHA-256 指纹" >&2
+            cat signing.txt >&2
+            exit 1
+          fi
           expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
           if [[ "$actual" != "$expected" ]]; then
             echo "签名证书与发布配置不匹配" >&2
