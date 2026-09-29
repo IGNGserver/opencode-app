@@ -427,7 +427,7 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
       Spacer(Modifier.height(12.dp))
       if (request.always.isNotEmpty()) {
         Text(
-          "选择“当前会话记住”将保存规则：" + request.always.joinToString(", "),
+          "选择“始终允许”将在服务器保存规则：" + request.always.joinToString(", "),
           style = MaterialTheme.typography.labelMedium,
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -445,7 +445,7 @@ fun PermissionPanel(request: PermissionRequest, controller: MobileController) {
           Text("允许一次")
         }
         TextButton(shape = RoundedCornerShape(6.dp), onClick = { controller.replyPermission(request, "always") }) {
-          Text("当前会话记住")
+          Text("始终允许")
         }
       }
     }

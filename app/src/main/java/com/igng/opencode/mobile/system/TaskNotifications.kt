@@ -86,8 +86,9 @@ class TaskNotifications(private val context: Context) {
     if (state.phase == TaskPhase.WAITING_PERMISSION && permission != null) {
       builder.addAction(0, "拒绝", action("reject", profile, session, permission))
       builder.addAction(0, "允许一次", action("once", profile, session, permission))
-      // Label matches the in-app button and the only scope the client can actually assert.
-      builder.addAction(0, "当前会话记住", action("always", profile, session, permission))
+      // Scope-neutral label: the client cannot verify whether "always" is remembered for the
+      // session, project or globally (A16).
+      builder.addAction(0, "始终允许", action("always", profile, session, permission))
     }
     if (state.phase == TaskPhase.WAITING_QUESTION) {
       builder.addAction(0, "回答", open(profile.id, session.id))

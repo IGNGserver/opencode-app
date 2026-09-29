@@ -4,12 +4,15 @@
 
 基线：`db7289d`。整改分支：`fix/audit-remediation`。验证见提交信息与下方"已完成验证"。
 
-## 1. 服务端权限域与 "always" 的真实语义（A16 核心）
+## 1. 服务端权限域与 "always" 的真实语义（A16）
 
-- 现状：App 把协议值 `always` 的按钮标为"当前会话记住"，`replyPermission` 只上报 `reply`/`remember`，客户端没有任何证据能保证服务端把授权限制在"当前会话"。
-- 为什么没做：需要目标 OpenCode 实例的真实契约（V1 `permission/:id/reply`、V2 `api/session/:id/permission/:id/reply` 的 `remember`/`always` 作用域、是否跨会话持久、能否撤销）才能确定正确的 UI 文案与请求字段。没有 `/doc` 或服务端实现快照，贸然改文案或增加"记住范围"参数可能制造新的错误承诺。
-- 本轮已做：系统通知不再在缺少上下文时直接给长期授权（只展示 action+patterns+保存规则），把"始终允许"文案统一为"当前会话记住"。**作用域本身仍未验证。**
-- 建议：拿到目标版本 OpenAPI 后再决定 UI 文案与请求参数，必要时对 always 增加"将保存的规则"预览和撤销入口。
+- 现状：App 把协议值 `always` 的按钮标为"始终允许"，`replyPermission` 只上报决策，客户端没有在运行时探测服务端把授权保存到什么范围。
+- 本轮新证据：核对 OpenCode 当前发布的 V2 OpenAPI（`https://opencode.ai/v2/openapi.json`）后确认：
+  - `Permission.Request` 字段为 `action`/`resources`/`save`/`metadata`/`source{type,messageID,id}`；`Permission.Reply` 枚举为 `once|always|reject`。
+  - `always` 会生成"已保存权限" `PermissionSaved.Info`，其字段含 `projectID`/`action`/`resource`/`time`，即**绑定到项目、持久、可撤销**，而不是"当前会话"。
+  - 服务器提供 `GET /api/permission/saved` 与 `DELETE /api/permission/saved/{id}`，可用于列出和撤销已保存规则。
+- 本轮已做：把 UI 与通知的按钮文案统一为范围中立的"始终允许"，并在界面展示"选择始终允许将在服务器保存规则：<action/resource>"；不再声称"当前会话记住"。
+- 仍待更强模型/用户决定：是否在 App 内提供"已保存权限"查看与撤销入口；以及 `always` 在 V1 协议下的真实范围（V1 契约未在本轮核对）。注意发布规范明确 V2 为当前版本，V1 仅作迁移输入。
 
 ## 2. 多服务器并行任务监控 vs 单连接的产品形态（A09 结构性部分）
 
@@ -24,22 +27,41 @@
 - 本轮已做：把异步操作收敛到不可变 `OperationContext`、把降级状态显式化（`degraded`）、统一了两端工具投影与契约用例，为后续拆分打下可测试的边界。
 - 建议：先补 Controller 层（A/B 服务器与多项目切换、延迟响应、局部端点失败）与仪器测试，再拆出"每服务器连接/快照仓库 + 不可变命令执行器 + 归一化事件模型 + UI 状态层"。
 
-## 4. SSE 可靠性与事件游标语义（A04 的完整解）
+## 4. SSE 可靠性与事件游标语义（A04）
 
-- 现状：本轮把"队列溢出静默丢弃"改成"关闭流并触发重连 + 全量对账"，权限/终态不再无声消失。但 `Last-Event-ID` 游标的服务端重放语义、以及"只可合并能证明可覆盖的文本增量"仍未实现。
-- 为什么没做：需要服务端支持事件 ID 重放的具体行为验证；客户端单方面假设重放可能补不齐或重复。属于跨端一致性设计。
-- 建议：在目标实例上做事件 ID 重放/乱序/正常关闭验收后，再决定是依赖服务端重放还是客户端定期全量对账。
+- 本轮已做：
+  - 队列溢出不再静默丢弃，而是让流失败以触发重连与全量对账。
+  - 新增常驻"控制面对账"：流正常时每 45 秒重读 catalog/status/permissions/questions，即使服务端在没有可见失败的情况下丢事件，权限与终态也会收敛。
+- 仍待验证：`Last-Event-ID` 的服务端重放语义。当前发布的 V2 OpenAPI 未在 `/api/event` 描述重放行为，仅 SSE 帧带 `id`；客户端已不强依赖重放（靠周期对账兜底）。
+- 建议：在目标实例上做事件 ID 重放/乱序/正常关闭验收后，再决定是否依赖服务端重放。
 
-## 5. 无法在本机验收的边界（证据缺口，非代码缺陷）
+## 5. V2 契约与当前发布 OpenAPI 的差异（需目标实例确认）
+
+核对 `https://opencode.ai/v2/openapi.json` 后发现应用内 V2 适配与当前发布规范存在多处不一致。**没有贸然改动**，因为无法确认设备实际连接的是否为当前 V2（应用的 V2 健康检查路径 `api/health` 也不在规范内，规范为 `/api/info`）。这些应在拿到目标实例 `/openapi.json` 或 `/doc` 快照后逐项核对：
+
+| 位置 | 应用当前 | 当前发布规范 | 风险 |
+|---|---|---|---|
+| V2 health | `GET api/health`（看 `healthy`/`pid`） | `GET /api/info` | 若目标为当前 V2，健康检查可能失败 |
+| V2 权限回复体 | `POST .../permission/{id}/reply` body `{reply}` | body `{decision: once|always|reject}`，`additionalProperties:false` | 当前 V2 下回复可能 400 |
+| V2 unrevert | `POST api/session/{id}/revert/clear` | `DELETE /api/session/{sessionID}/revert` 或 `POST .../revert/commit` | 路径不存在 |
+| V2 问题 | `api/question/request`、`.../question/{id}/reply|reject` | 规范无 question，使用 `session/{id}/form`/`form/{id}/reply` | 问题交互在 V2 可能不可用 |
+| 权限 source | 读 `source.callID` | 字段为 `source.id` | `toolCallId` 恒为空 |
+
+- 本轮已做：把范围中立的权限文案与保存规则预览落地；未改上述路径与请求体。
+- 建议：以目标实例契约为准统一 V2 适配；若要兼容多个 V2 修订，采用"规范形状优先、失败回退旧形状"的显式策略并加目标实例测试。
+
+## 6. 无法在本机验收的边界（证据缺口，非代码缺陷）
 
 - 真实 OpenCode Server 的 V1/V2 契约、真实 Android 设备 UI 与低内存回收、FCM 实际投递、Android 16 Live Updates 提升、HyperOS 超级岛、历史 APK 覆盖安装。
 - 本轮已做静态与 JVM/MockWebServer 层面的验证；上述真机/真服务端验收需在目标环境完成，不能用本机结果宣称已通过。
 
-## 6. 其他低优先级加固（未做，属可选项）
+## 7. 其他低优先级加固
 
-- GitHub Actions 目前用主版本 tag（`actions/checkout@v4` 等）。审计建议固定到 commit SHA；改动涉及核对每个 action 的 SHA，建议在独立 PR 中统一处理，避免与本轮功能修复混在一起。
-- Android 依赖尚未启用 Gradle 依赖验证元数据（`dependencyVerification`）。启用需要为全部依赖生成/维护校验清单，属于独立的供应链改动。
-- UI 仍然一次性加载整个会话历史做展示（`loadSession`）；网络层已限制单响应与分页总量。大历史的分页/懒加载属于界面层改动，建议在补了 Compose 仪器测试后再做。
+- GitHub Actions 已固定到 commit SHA（`actions/checkout` v4.4.0、`actions/setup-java` v4.9.1、`actions/setup-node` v4.4.0）。
+- Gradle wrapper 已加入 `distributionSha256Sum`。
+- Android 依赖尚未启用 Gradle 依赖验证元数据（`verification-metadata.xml`）；生成与维护完整校验清单属独立供应链改动，建议单独 PR。
+- UI 仍一次性加载整个会话历史做展示（`loadSession`）；网络层已限制单响应与分页总量。大历史的分页/懒加载属于界面层改动，建议在补了 Compose 仪器测试后再做。
+
 
 ## 已完成验证（本轮）
 

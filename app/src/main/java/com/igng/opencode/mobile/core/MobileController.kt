@@ -54,6 +54,8 @@ class MobileController private constructor(private val appContext: Context) {
     fun get(context: Context): MobileController = instance ?: synchronized(this) {
       instance ?: MobileController(context.applicationContext).also { instance = it }
     }
+    /** Control-plane reconciliation cadence while the SSE stream is up. */
+    private const val RECONCILE_INTERVAL_MILLIS = 45_000L
   }
   private val store = ServerStore(appContext)
   private val cache = OfflineCache(appContext)
@@ -74,6 +76,7 @@ class MobileController private constructor(private val appContext: Context) {
   private val sendMutex = Mutex()
   private val contentSearchMutex = Mutex()
   private var searchQuery = ""
+  private var reconcile: Job? = null
 
   init { if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
   fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
@@ -100,6 +103,7 @@ class MobileController private constructor(private val appContext: Context) {
       refresh?.cancel()
       eventRefresh?.cancel()
       messageRefresh?.cancel()
+      reconcile?.cancel()
       generation += 1
       api = null
       lastEventId = ""
@@ -116,6 +120,7 @@ class MobileController private constructor(private val appContext: Context) {
     refresh?.cancel()
     eventRefresh?.cancel()
     messageRefresh?.cancel()
+    reconcile?.cancel()
     generation += 1
     val token = generation
     lastEventId = ""
@@ -171,7 +176,7 @@ class MobileController private constructor(private val appContext: Context) {
         sessionId = sessionId, messages = sessionId?.let { selected -> cache.messages(id, selected) } ?: emptyList()) }
     }
   }
-  private suspend fun loadAll(token: Int) {
+  private suspend fun loadAll(token: Int, controlOnly: Boolean = false) {
     val client = api ?: return
     val version = client.health()
     val projects = client.projects()
@@ -234,6 +239,7 @@ class MobileController private constructor(private val appContext: Context) {
         sessionId = (previous.sessionId ?: store.selectedSession())?.takeIf { id -> sessions.any { it.id == id } })
     }
     val current = mutable.value
+    if (controlOnly) return
     current.project?.let { project -> loadChoices(project.directory, token) }
     current.session?.let { loadSession(it, token = token) }
   }
@@ -274,6 +280,18 @@ class MobileController private constructor(private val appContext: Context) {
           retry = (retry * 2).coerceAtMost(30_000L)
           runCatching { loadAll(token) }
         }
+      }
+    }
+    // Standing reconciliation: while the stream is nominally up, periodically re-read the control
+    // plane (catalog/status/permissions/questions). This converges state even if the server drops an
+    // event without the client seeing a stream failure, so a missed permission or terminal state is
+    // repaired rather than waiting for the user to notice (A04/A10).
+    reconcile?.cancel()
+    reconcile = scope.launch {
+      while (isActive && token == generation) {
+        delay(RECONCILE_INTERVAL_MILLIS)
+        if (token != generation || refresh?.isActive == true) continue
+        runCatching { loadAll(token, controlOnly = true) }
       }
     }
   }
