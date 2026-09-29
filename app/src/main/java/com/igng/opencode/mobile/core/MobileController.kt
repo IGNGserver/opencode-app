@@ -290,7 +290,10 @@ class MobileController private constructor(private val appContext: Context) {
     reconcile = scope.launch {
       while (isActive && token == generation) {
         delay(RECONCILE_INTERVAL_MILLIS)
-        if (token != generation || refresh?.isActive == true) continue
+        // Skip while a manual refresh is running or while the stream is already down: the stream
+        // loop performs a full loadAll on every reconnect, so reconciling there would only fight the
+        // disconnected state.
+        if (token != generation || refresh?.isActive == true || !state.value.connected) continue
         runCatching { loadAll(token, controlOnly = true) }
       }
     }
