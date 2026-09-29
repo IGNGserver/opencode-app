@@ -6,27 +6,31 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.push.PushRegistration
+import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.extra.SuperDialog
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.*
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private enum class RootTab(val label: String) {
   HOME("工作台"), SESSIONS("会话"), SETTINGS("设置")
@@ -34,22 +38,30 @@ private enum class RootTab(val label: String) {
 
 class MainActivity : ComponentActivity() {
   private var deepLink by mutableStateOf<Pair<String, String>?>(null)
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     parseDeepLink(intent)
     val controller = MobileController.get(this)
+
     setContent {
       val state by controller.state.collectAsState()
       val drafts = rememberSaveable(saver = androidx.compose.runtime.saveable.mapSaver(
-        save = { it.toMap() }, restore = { saved -> mutableStateMapOf<String, String>().apply { saved.forEach { (k, v) -> put(k, v as String) } } }
+        save = { it.toMap() },
+        restore = { saved -> mutableStateMapOf<String, String>().apply { saved.forEach { (k, v) -> put(k, v as String) } } }
       )) { mutableStateMapOf<String, String>() }
+
       val preferences = remember { getSharedPreferences("ui", MODE_PRIVATE) }
       var dark by remember { mutableStateOf(preferences.getBoolean("dark", false)) }
       var currentTab by rememberSaveable { mutableStateOf(RootTab.HOME) }
       var inChatDetail by rememberSaveable { mutableStateOf(false) }
       var showingServersSheet by remember { mutableStateOf(false) }
-      val snackbar = remember { SnackbarHostState() }
+      var globalMessage by remember { mutableStateOf<String?>(null) }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+      // 屏幕自适应检测：平板/桌面宽屏使用侧边栏 NavigationRail，手机竖屏使用悬浮 Liquid Glass 底栏
+      val configuration = LocalConfiguration.current
+      val isWideScreen = configuration.screenWidthDp >= 640
 
       LaunchedEffect(state.profiles.isEmpty()) {
         if (state.profiles.isEmpty()) showingServersSheet = true
@@ -57,12 +69,12 @@ class MainActivity : ComponentActivity() {
 
       LaunchedEffect(state.error) {
         val error = state.error ?: return@LaunchedEffect
-        snackbar.showSnackbar(error)
+        globalMessage = error
         controller.clearError()
       }
       LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
-        snackbar.showSnackbar(message)
+        globalMessage = message
         controller.clearMessage()
       }
       LaunchedEffect(state.serverId) {
@@ -79,99 +91,248 @@ class MainActivity : ComponentActivity() {
         }
       }
 
-      // Android back button handling for chat detail screen
       BackHandler(enabled = inChatDetail) {
         inChatDetail = false
       }
 
-      FluentTheme(dark) {
-        // Read the IME inset through derivedStateOf so the navigation bar only recomposes when the
-        // keyboard actually opens or closes, not on every state change that reaches this scope.
+      OpenCodeMiuixTheme(dark = dark) {
         val density = LocalDensity.current
         val imeInsets = WindowInsets.ime
         val keyboardOpen by remember(imeInsets, density) {
           derivedStateOf { imeInsets.getBottom(density) > 0 }
         }
+
+        // 大标题滚动行为控制器
+        val homeScrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val navIcons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)
+
+        // 顶层采用 MIUIX 官方 Scaffold 脚手架
         Scaffold(
           modifier = Modifier.imePadding(),
-          snackbarHost = { SnackbarHost(snackbar) },
-          bottomBar = {
-            if (!inChatDetail && state.profiles.isNotEmpty() && !keyboardOpen) {
-              NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
-                RootTab.entries.forEach { item ->
-                  NavigationBarItem(
-                    selected = currentTab == item,
-                    onClick = { currentTab = item },
-                    icon = { FluentNavIcon(item.name, currentTab == item) },
-                    label = { Text(item.label) },
-                    alwaysShowLabel = true
+          topBar = {
+            if (!inChatDetail) {
+              when (currentTab) {
+                RootTab.HOME -> {
+                  TopAppBar(
+                    title = "工作台",
+                    largeTitle = "任务工作台",
+                    scrollBehavior = homeScrollBehavior,
+                    navigationIcon = {
+                      // 顶部服务器切换胶囊 (Liquid Glass 质感)
+                      LiquidGlassSurface(
+                        modifier = Modifier.padding(start = 12.dp),
+                        cornerRadius = 14.dp,
+                        onClick = { showingServersSheet = true }
+                      ) {
+                        Row(
+                          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                          verticalAlignment = Alignment.CenterVertically,
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                          Box(
+                            Modifier.size(8.dp).background(
+                              if (state.connected) MiuixColorTokens.Success else MiuixColorTokens.Warning,
+                              shape = miuixSquircleShape(4.dp)
+                            )
+                          )
+                          Text(
+                            text = state.server?.name ?: "选择服务器",
+                            style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium)
+                          )
+                          Text("▾", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
+                        }
+                      }
+                    },
+                    actions = {
+                      IconButton(onClick = controller::reload) {
+                        Icon(imageVector = MiuixIcons.Refresh, contentDescription = "刷新")
+                      }
+                    }
                   )
+                }
+                RootTab.SESSIONS -> {
+                  SmallTopAppBar(
+                    title = "全部会话",
+                    actions = {
+                      IconButton(onClick = {
+                        if (!state.protocol.supportsTitleOnCreate) {
+                          controller.createSession("") { inChatDetail = true }
+                        } else {
+                          controller.createSession("新任务") { inChatDetail = true }
+                        }
+                      }) {
+                        Icon(imageVector = MiuixIcons.Add, contentDescription = "新建会话")
+                      }
+                    }
+                  )
+                }
+                RootTab.SETTINGS -> {
+                  SmallTopAppBar(title = "设置")
+                }
+              }
+            }
+          },
+          bottomBar = {
+            // 移动端/窄屏：采用 Liquid Glass 悬浮导航栏 FloatingNavigationBar
+            if (!isWideScreen && !inChatDetail && state.profiles.isNotEmpty() && !keyboardOpen) {
+              Box(
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .navigationBarsPadding()
+                  .padding(bottom = 12.dp),
+                contentAlignment = Alignment.Center
+              ) {
+                LiquidGlassSurface(
+                  cornerRadius = 28.dp
+                ) {
+                  Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                  ) {
+                    RootTab.entries.forEachIndexed { index, item ->
+                      val isSelected = currentTab == item
+                      val tint = if (isSelected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
+                      Row(
+                        modifier = Modifier
+                          .clip(miuixSquircleShape(18.dp))
+                          .clickable { currentTab = item }
+                          .background(if (isSelected) MiuixColorTokens.PrimarySubtle else Color.Transparent)
+                          .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                        Icon(
+                          imageVector = navIcons[index],
+                          contentDescription = item.label,
+                          tint = tint,
+                          modifier = Modifier.size(22.dp)
+                        )
+                        if (isSelected) {
+                          Text(
+                            text = item.label,
+                            style = MiuixTheme.textStyles.footnote1.copy(
+                              color = MiuixTheme.colorScheme.primary,
+                              fontWeight = FontWeight.SemiBold
+                            )
+                          )
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
           }
         ) { insets ->
-          Box(Modifier.fillMaxSize().padding(insets)) {
-            AnimatedContent(
-              targetState = inChatDetail,
-              label = "ChatDetailTransition",
-              transitionSpec = {
-                if (targetState) {
-                  slideInHorizontally { width -> width } + fadeIn() togetherWith
-                      slideOutHorizontally { width -> -width / 3 } + fadeOut()
-                } else {
-                  slideInHorizontally { width -> -width / 3 } + fadeIn() togetherWith
-                      slideOutHorizontally { width -> width } + fadeOut()
-                }
-              }
-            ) { isDetail ->
-              if (isDetail) {
-                ChatScreen(
-                  state = state,
-                  controller = controller,
-                  drafts = drafts,
-                  onBack = { inChatDetail = false }
-                )
-              } else {
-                when (currentTab) {
-                  RootTab.HOME -> HomeScreen(
-                    state = state,
-                    controller = controller,
-                    onOpen = { sessionId ->
-                      controller.selectSession(sessionId)
-                      inChatDetail = true
-                    },
-                    onServers = { showingServersSheet = true },
-                    onSessions = { currentTab = RootTab.SESSIONS }
-                  )
-                  RootTab.SESSIONS -> SessionsScreen(
-                    state = state,
-                    controller = controller,
-                    onOpen = { sessionId ->
-                      controller.selectSession(sessionId)
-                      inChatDetail = true
-                    }
-                  )
-                  RootTab.SETTINGS -> SettingsScreen(
-                    state = state,
-                    controller = controller,
-                    dark = dark,
-                    onDark = {
-                      dark = it
-                      preferences.edit().putBoolean("dark", it).apply()
-                    },
-                    onNotifications = {
-                      if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    },
-                    onManageServers = { showingServersSheet = true }
+          Row(Modifier.fillMaxSize().padding(insets)) {
+            // 宽屏模式：左侧 MIUIX 官方 NavigationRail 导航侧边栏
+            if (isWideScreen && !inChatDetail && state.profiles.isNotEmpty()) {
+              NavigationRail {
+                RootTab.entries.forEachIndexed { index, item ->
+                  NavigationRailItem(
+                    selected = currentTab == item,
+                    onClick = { currentTab = item },
+                    icon = navIcons[index],
+                    label = item.label
                   )
                 }
               }
             }
-            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
+
+            // 主视图内容容器
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+              AnimatedContent(
+                targetState = inChatDetail,
+                label = "DetailTransition",
+                transitionSpec = {
+                  if (targetState) {
+                    slideInHorizontally { width -> width } + fadeIn() togetherWith
+                        slideOutHorizontally { width -> -width / 4 } + fadeOut()
+                  } else {
+                    slideInHorizontally { width -> -width / 4 } + fadeIn() togetherWith
+                        slideOutHorizontally { width -> width } + fadeOut()
+                  }
+                }
+              ) { isDetail ->
+                if (isDetail) {
+                  ChatScreen(
+                    state = state,
+                    controller = controller,
+                    drafts = drafts,
+                    onBack = { inChatDetail = false }
+                  )
+                } else {
+                  when (currentTab) {
+                    RootTab.HOME -> HomeScreen(
+                      state = state,
+                      controller = controller,
+                      onOpen = { sessionId ->
+                        controller.selectSession(sessionId)
+                        inChatDetail = true
+                      },
+                      onServers = { showingServersSheet = true },
+                      onSessions = { currentTab = RootTab.SESSIONS },
+                      scrollBehavior = homeScrollBehavior
+                    )
+                    RootTab.SESSIONS -> SessionsScreen(
+                      state = state,
+                      controller = controller,
+                      onOpen = { sessionId ->
+                        controller.selectSession(sessionId)
+                        inChatDetail = true
+                      }
+                    )
+                    RootTab.SETTINGS -> SettingsScreen(
+                      state = state,
+                      controller = controller,
+                      dark = dark,
+                      onDark = {
+                        dark = it
+                        preferences.edit().putBoolean("dark", it).apply()
+                      },
+                      onNotifications = {
+                        if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                      },
+                      onManageServers = { showingServersSheet = true }
+                    )
+                  }
+                }
+              }
+
+              // 全局加载指示器 (MIUIX 风格)
+              if (state.loading) {
+                InfiniteProgressIndicator(
+                  modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).height(3.dp)
+                )
+              }
+            }
           }
         }
 
+        // 全局消息提示弹窗 (MIUIX SuperDialog)
+        val msg = globalMessage
+        if (msg != null) {
+          SuperDialog(
+            title = "提示",
+            show = true,
+            onDismissRequest = { globalMessage = null }
+          ) {
+            Column(Modifier.padding(top = 8.dp)) {
+              Text(msg, style = MiuixTheme.textStyles.body1)
+              Spacer(Modifier.height(14.dp))
+              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(
+                  text = "确定",
+                  colors = ButtonDefaults.textButtonColorsPrimary(),
+                  onClick = { globalMessage = null }
+                )
+              }
+            }
+          }
+        }
+
+        // 服务器管理 BottomSheet
         if (showingServersSheet) {
           ServersModal(
             state = state,
@@ -186,47 +347,17 @@ class MainActivity : ComponentActivity() {
       }
     }
   }
-  override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); parseDeepLink(intent) }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    parseDeepLink(intent)
+  }
+
   private fun parseDeepLink(intent: Intent?) {
     val uri = intent?.data ?: return
     if (uri.scheme != "opencode-mobile" || uri.host != "server") return
     val parts = uri.pathSegments
     if (parts.size >= 3 && parts[1] == "session") deepLink = parts[0] to parts[2]
-  }
-}
-
-@Composable
-private fun FluentNavIcon(name: String, selected: Boolean) {
-  val color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-  Canvas(Modifier.size(22.dp)) {
-    val u = size.width / 24f
-    val stroke = Stroke(width = 2f * u, cap = StrokeCap.Round, join = StrokeJoin.Round)
-    fun point(x: Float, y: Float) = Offset(x * u, y * u)
-    when (name) {
-      "HOME" -> {
-        val roof = Path().apply { moveTo(3*u, 11*u); lineTo(12*u, 3*u); lineTo(21*u, 11*u) }
-        drawPath(roof, color, style = stroke)
-        val base = Path().apply { moveTo(5*u, 10*u); lineTo(5*u, 21*u); lineTo(19*u, 21*u); lineTo(19*u, 10*u) }
-        drawPath(base, color, style = stroke)
-        drawLine(color, point(10f, 21f), point(10f, 15f), strokeWidth = 2*u)
-        drawLine(color, point(14f, 15f), point(14f, 21f), strokeWidth = 2*u)
-      }
-      "SESSIONS" -> {
-        drawRoundRect(color, point(3f, 3f), androidx.compose.ui.geometry.Size(18*u, 18*u), CornerRadius(2*u), style = stroke)
-        for (y in listOf(8f, 12f, 16f)) {
-          drawCircle(color, 0.8f*u, point(7f, y))
-          drawLine(color, point(10f, y), point(17f, y), strokeWidth = 1.8f*u, cap = StrokeCap.Round)
-        }
-      }
-      "SETTINGS" -> {
-        drawCircle(color, 6.5f*u, point(12f, 12f), style = stroke)
-        drawCircle(color, 2.2f*u, point(12f, 12f), style = stroke)
-        for (index in 0 until 8) {
-          val angle = index * Math.PI / 4.0
-          val dx = kotlin.math.cos(angle).toFloat(); val dy = kotlin.math.sin(angle).toFloat()
-          drawLine(color, point(12f + dx*8f, 12f + dy*8f), point(12f + dx*10f, 12f + dy*10f), strokeWidth = 2*u, cap = StrokeCap.Round)
-        }
-      }
-    }
   }
 }
