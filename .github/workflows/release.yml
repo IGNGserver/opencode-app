@@ -146,7 +146,11 @@ jobs:
           test -n "$EXPECTED_CERT" || { echo "缺少固定证书指纹" >&2; exit 1; }
           actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
           expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
-          test "$actual" = "$expected" || { echo "签名证书与发布配置不匹配" >&2; exit 1; }
+          if [[ "$actual" != "$expected" ]]; then
+            echo "签名证书与发布配置不匹配" >&2
+            echo "产物证书 SHA-256：$actual" >&2
+            exit 1
+          fi
           echo "签名及非调试产物检查通过"
 
       - name: 发布 GitHub Release
