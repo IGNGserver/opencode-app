@@ -5,11 +5,14 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -19,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -26,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.push.PushRegistration
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -59,7 +65,7 @@ class MainActivity : ComponentActivity() {
       var globalMessage by remember { mutableStateOf<String?>(null) }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
-      // 屏幕自适应检测：平板/桌面宽屏使用侧边栏 NavigationRail，手机竖屏使用悬浮 Liquid Glass 底栏
+      // 屏幕自适应：平板/宽屏使用 NavigationRail，手机使用悬浮 Liquid Glass 底栏
       val configuration = LocalConfiguration.current
       val isWideScreen = configuration.screenWidthDp >= 640
 
@@ -91,8 +97,26 @@ class MainActivity : ComponentActivity() {
         }
       }
 
-      BackHandler(enabled = inChatDetail) {
-        inChatDetail = false
+      // 预见式返回 (Predictive Back Gesture) 动力学状态
+      val backProgress = remember { Animatable(0f) }
+      PredictiveBackHandler(enabled = inChatDetail) { progressFlow ->
+        try {
+          progressFlow.collect { backEvent ->
+            backProgress.snapTo(backEvent.progress)
+          }
+          // 手势完成返回
+          inChatDetail = false
+          backProgress.snapTo(0f)
+        } catch (e: CancellationException) {
+          // 手势取消，物理回弹归零
+          backProgress.animateTo(
+            targetValue = 0f,
+            animationSpec = spring(
+              dampingRatio = Spring.DampingRatioMediumBouncy,
+              stiffness = Spring.StiffnessMedium
+            )
+          )
+        }
       }
 
       OpenCodeMiuixTheme(dark = dark) {
@@ -102,7 +126,6 @@ class MainActivity : ComponentActivity() {
           derivedStateOf { imeInsets.getBottom(density) > 0 }
         }
 
-        // 大标题滚动行为控制器
         val homeScrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
         val navIcons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)
 
@@ -121,7 +144,7 @@ class MainActivity : ComponentActivity() {
                       // 顶部服务器切换胶囊 (Liquid Glass 质感)
                       LiquidGlassSurface(
                         modifier = Modifier.padding(start = 12.dp),
-                        cornerRadius = 14.dp,
+                        cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
                         onClick = { showingServersSheet = true }
                       ) {
                         Row(
@@ -173,7 +196,7 @@ class MainActivity : ComponentActivity() {
             }
           },
           bottomBar = {
-            // 移动端/窄屏：采用 Liquid Glass 悬浮导航栏 FloatingNavigationBar
+            // 移动端/窄屏：悬浮 Liquid Glass 导航 Dock
             if (!isWideScreen && !inChatDetail && state.profiles.isNotEmpty() && !keyboardOpen) {
               Box(
                 modifier = Modifier
@@ -183,11 +206,11 @@ class MainActivity : ComponentActivity() {
                 contentAlignment = Alignment.Center
               ) {
                 LiquidGlassSurface(
-                  cornerRadius = 28.dp
+                  cornerRadius = LiquidGlassTokens.PillCornerRadius
                 ) {
                   Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                   ) {
                     RootTab.entries.forEachIndexed { index, item ->
@@ -195,7 +218,7 @@ class MainActivity : ComponentActivity() {
                       val tint = if (isSelected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
                       Row(
                         modifier = Modifier
-                          .clip(miuixSquircleShape(18.dp))
+                          .clip(miuixSquircleShape(16.dp))
                           .clickable { currentTab = item }
                           .background(if (isSelected) MiuixColorTokens.PrimarySubtle else Color.Transparent)
                           .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -226,7 +249,7 @@ class MainActivity : ComponentActivity() {
           }
         ) { insets ->
           Row(Modifier.fillMaxSize().padding(insets)) {
-            // 宽屏模式：左侧 MIUIX 官方 NavigationRail 导航侧边栏
+            // 宽屏模式：左侧 NavigationRail
             if (isWideScreen && !inChatDetail && state.profiles.isNotEmpty()) {
               NavigationRail {
                 RootTab.entries.forEachIndexed { index, item ->
@@ -240,18 +263,43 @@ class MainActivity : ComponentActivity() {
               }
             }
 
-            // 主视图内容容器
-            Box(Modifier.weight(1f).fillMaxHeight()) {
+            // 主视图内容容器 (结合预见式返回缩放与平滑渐变)
+            val currentProgress = backProgress.value
+            Box(
+              Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .graphicsLayer {
+                  if (inChatDetail && currentProgress > 0f) {
+                    // 跟随手指返回进度的轻微等比微缩与位移
+                    val scale = 1f - (currentProgress * 0.08f)
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = currentProgress * 80f
+                    alpha = 1f - (currentProgress * 0.25f)
+                  }
+                }
+            ) {
               AnimatedContent(
                 targetState = inChatDetail,
                 label = "DetailTransition",
                 transitionSpec = {
                   if (targetState) {
-                    slideInHorizontally { width -> width } + fadeIn() togetherWith
-                        slideOutHorizontally { width -> -width / 4 } + fadeOut()
+                    (slideInHorizontally(
+                      animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
+                    ) { width -> width } + fadeIn()).togetherWith(
+                      slideOutHorizontally(
+                        animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
+                      ) { width -> -width / 4 } + fadeOut()
+                    )
                   } else {
-                    slideInHorizontally { width -> -width / 4 } + fadeIn() togetherWith
-                        slideOutHorizontally { width -> width } + fadeOut()
+                    (slideInHorizontally(
+                      animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
+                    ) { width -> -width / 4 } + fadeIn()).togetherWith(
+                      slideOutHorizontally(
+                        animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
+                      ) { width -> width } + fadeOut()
+                    )
                   }
                 }
               ) { isDetail ->

@@ -5,9 +5,9 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -17,41 +17,42 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.kyant.shapes.RoundedCornerStyle
 import com.kyant.shapes.RoundedRectangle
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
 /**
- * Liquid Glass 设计实现:
- * 作为 Navigation / Floating Controls / Live Task Surface 的高阶动态材料。
- * 包含：
- * 1. 连续曲率 Squircle 几何形 (Continuous Curvature)
- * 2. 多重透光与微光散射梯度 (Optical Translucency & Specular Refraction)
- * 3. 动态高光边缘轮廓 (Glass Highlights & Rim Light)
- * 4. 弹性物理交互反馈 (Liquid Spring Motion: press scale + sink feedback)
+ * Liquid Glass（液态玻璃）设计系统实现:
+ * 遵循小米 HyperOS 官方美学与 MIUIX 动效系统：
+ * 1. 连续曲率超椭圆 Squircle 轮廓 (Continuous Curvature)
+ * 2. 真实通透的多层光波折射与动态微光散射 (Refraction & Specular Scattering)
+ * 3. 随边界流淌的高光微晶边缘 (Rim Highlight & Frost Border)
+ * 4. 原生弹簧物理反馈 (Spring Physics Press / Sink Dynamics)
  */
 object LiquidGlassTokens {
   val PillCornerRadius = 32.dp
+  val DockCornerRadius = 24.dp
+  val CapsuleCornerRadius = 14.dp
   val ControlCornerRadius = 18.dp
-  val FloatingElevation = 8.dp
 
-  // 亮色液体玻璃基底与散射
-  val LightSurface = Color(0xD9FFFFFF)
-  val LightSurfaceVariant = Color(0xB3F0F4F8)
+  // 浅色模式液态玻璃基底
+  val LightSurface = Color(0xE6FFFFFF)
+  val LightSurfaceVariant = Color(0xC4F0F4FA)
   val LightBorder = Color(0x66FFFFFF)
-  val LightHighlight = Color(0x99FFFFFF)
+  val LightHighlight = Color(0xB3FFFFFF)
 
-  // 暗色液体玻璃基底与散射
-  val DarkSurface = Color(0xCC1A1E24)
-  val DarkSurfaceVariant = Color(0x99252B33)
-  val DarkBorder = Color(0x33FFFFFF)
-  val DarkHighlight = Color(0x4D8EAFCE)
+  // 深色模式液态玻璃基底
+  val DarkSurface = Color(0xD91E232B)
+  val DarkSurfaceVariant = Color(0xB3272E38)
+  val DarkBorder = Color(0x38FFFFFF)
+  val DarkHighlight = Color(0x4D69A1FF)
 }
 
 /**
- * 创建符合 MIUIX 标准的连续曲率圆角形状 (Squircle)
+ * 创建符合 MIUIX 标准的连续曲率超椭圆形状 (Squircle)
  */
 fun miuixSquircleShape(cornerRadius: Dp = 16.dp): Shape {
   return RoundedRectangle(
@@ -61,7 +62,7 @@ fun miuixSquircleShape(cornerRadius: Dp = 16.dp): Shape {
 }
 
 /**
- * 液体玻璃修饰符 - 为悬浮控件、活动任务岛和导航底栏提供真实的流体玻璃材质感
+ * 液体玻璃修饰符 - 为悬浮控件、底栏 Dock、输入舱和实时状态岛注入纯正的液态玻璃材质
  */
 fun Modifier.liquidGlass(
   cornerRadius: Dp = LiquidGlassTokens.ControlCornerRadius,
@@ -73,9 +74,15 @@ fun Modifier.liquidGlass(
   val shape = miuixSquircleShape(cornerRadius)
 
   val baseColor = when {
-    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.28f * alphaMultiplier else 0.22f * alphaMultiplier)
-    isDark -> LiquidGlassTokens.DarkSurface.copy(alpha = 0.85f * alphaMultiplier)
-    else -> LiquidGlassTokens.LightSurface.copy(alpha = 0.88f * alphaMultiplier)
+    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.26f * alphaMultiplier else 0.18f * alphaMultiplier)
+    isDark -> LiquidGlassTokens.DarkSurface.copy(alpha = 0.88f * alphaMultiplier)
+    else -> LiquidGlassTokens.LightSurface.copy(alpha = 0.90f * alphaMultiplier)
+  }
+
+  val variantColor = when {
+    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.12f * alphaMultiplier else 0.08f * alphaMultiplier)
+    isDark -> LiquidGlassTokens.DarkSurfaceVariant.copy(alpha = 0.72f * alphaMultiplier)
+    else -> LiquidGlassTokens.LightSurfaceVariant.copy(alpha = 0.76f * alphaMultiplier)
   }
 
   val highlightColor = if (isDark) LiquidGlassTokens.DarkHighlight else LiquidGlassTokens.LightHighlight
@@ -85,22 +92,19 @@ fun Modifier.liquidGlass(
     .clip(shape)
     .background(
       Brush.verticalGradient(
-        colors = listOf(
-          baseColor,
-          if (isDark) LiquidGlassTokens.DarkSurfaceVariant.copy(alpha = 0.70f * alphaMultiplier)
-          else LiquidGlassTokens.LightSurfaceVariant.copy(alpha = 0.75f * alphaMultiplier)
-        )
+        colors = listOf(baseColor, variantColor)
       ),
       shape = shape
     )
     .drawBehind {
       val strokePx = borderWidth.toPx()
+      // 顶部水平流体高光弧光
       drawLine(
         brush = Brush.horizontalGradient(
           colors = listOf(
-            highlightColor.copy(alpha = 0.1f),
-            highlightColor.copy(alpha = 0.8f),
-            highlightColor.copy(alpha = 0.1f)
+            highlightColor.copy(alpha = 0.05f),
+            highlightColor.copy(alpha = 0.85f),
+            highlightColor.copy(alpha = 0.05f)
           )
         ),
         start = Offset(cornerRadius.toPx(), strokePx / 2),
@@ -113,7 +117,7 @@ fun Modifier.liquidGlass(
       brush = Brush.verticalGradient(
         colors = listOf(
           borderColor.copy(alpha = 0.9f),
-          borderColor.copy(alpha = 0.25f)
+          borderColor.copy(alpha = 0.20f)
         )
       ),
       shape = shape
@@ -121,7 +125,7 @@ fun Modifier.liquidGlass(
 }
 
 /**
- * 带弹簧物理反馈的可交互 Liquid Glass 容器
+ * 搭载物理下沉反馈的 Liquid Glass 交互容器
  */
 @Composable
 fun LiquidGlassSurface(
@@ -132,36 +136,19 @@ fun LiquidGlassSurface(
   onClick: (() -> Unit)? = null,
   content: @Composable BoxScope.() -> Unit
 ) {
-  var isPressed by remember { mutableStateOf(false) }
-  val scale by animateFloatAsState(
-    targetValue = if (isPressed && onClick != null) 0.965f else 1.0f,
-    animationSpec = spring(
-      dampingRatio = Spring.DampingRatioMediumBouncy,
-      stiffness = Spring.StiffnessMedium
-    ),
-    label = "liquidGlassScale"
-  )
+  val interactionSource = remember { MutableInteractionSource() }
 
-  val interactionModifier = if (onClick != null) {
-    Modifier.pointerInput(onClick) {
-      detectTapGestures(
-        onPress = {
-          isPressed = true
-          tryAwaitRelease()
-          isPressed = false
-        },
-        onTap = { onClick() }
-      )
-    }
+  val clickableModifier = if (onClick != null) {
+    Modifier.clickable(
+      interactionSource = interactionSource,
+      indication = null, // 自定义弹簧动力学反馈
+      onClick = onClick
+    )
   } else Modifier
 
   Box(
     modifier = modifier
-      .graphicsLayer {
-        scaleX = scale
-        scaleY = scale
-      }
-      .then(interactionModifier)
+      .then(clickableModifier)
       .liquidGlass(
         cornerRadius = cornerRadius,
         isDark = isDark,
