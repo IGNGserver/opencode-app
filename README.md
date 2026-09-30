@@ -7,7 +7,7 @@
 - 多服务器连接、Basic Auth/官方 pair 链接、V1/V2 健康检查、Android Keystore 保护的密码与会话 Cookie、离线缓存、SSE 自动重连
 - 项目与会话、异步任务、Agent/Model、斜杠命令、文本/Reasoning/Tool 消息、停止与权限/问题处理
 - Todo、子会话、改动、文件浏览与搜索；V1 另支持重命名、删除、Fork、Share，V1/V2 支持 Summarize、Revert
-- 全服务器任务总览灵动岛：实时显示「xx 个运行中、xx 个未读已完成」，有待处理时追加「xx 个待回复」、有失败时追加「xx 个失败」；同一口径同时用于 Android 16 Live Updates 通知与小米超级岛参数适配
+- 全服务器任务总览灵动岛：实时显示「xx 个运行中、xx 个未读已完成」，有待处理时追加「xx 个待回复」、有失败时追加「xx 个失败」；同一口径按设备能力分发到各厂商灵动岛（小米超级岛、vivo 原子岛、Android 16 Live Updates / OPPO ColorOS 16 流体云），详见 `docs/ISLAND_ADAPTATION.md`
 - 运行中、待处理、完成通知；任务总览仅统计未读结果，用户打开会话后即视为已读
 - 可选的 OpenCode 插件 + FCM 伴随服务，用于 App 不在前台时推送状态
 

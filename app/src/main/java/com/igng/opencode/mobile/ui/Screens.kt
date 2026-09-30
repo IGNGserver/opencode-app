@@ -25,7 +25,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import com.igng.opencode.mobile.core.*
 import com.igng.opencode.mobile.push.PushRegistration
+import com.igng.opencode.mobile.system.IslandRegistry
+import com.igng.opencode.mobile.system.IslandSupport
+import com.igng.opencode.mobile.system.TaskNotifications
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperArrow
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
@@ -1003,6 +1008,11 @@ fun SettingsScreen(
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
   val pushAvailable = remember(state.serverId) { PushRegistration(context).available() }
+  // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
+  var islandSupport by remember { mutableStateOf<List<IslandSupport>?>(null) }
+  LaunchedEffect(state.serverId) {
+    islandSupport = withContext(Dispatchers.IO) { IslandRegistry.diagnostics(context) }
+  }
 
   LazyColumn(
     modifier = Modifier
@@ -1056,7 +1066,7 @@ fun SettingsScreen(
         Text("系统通知与灵动岛 / 超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
         Spacer(Modifier.height(4.dp))
         Text(
-          "支持 Android 实时进度条与小米 HyperOS 超级岛 / 流体胶囊展示，常驻显示全服务器任务的「运行中 / 已完成 / 待回复 / 失败」计数。",
+          "常驻显示全服务器任务的「运行中 / 已完成 / 待回复 / 失败」计数，并按设备能力分发到各厂商灵动岛。",
           style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
         )
         Spacer(Modifier.height(10.dp))
@@ -1065,6 +1075,63 @@ fun SettingsScreen(
           colors = ButtonDefaults.buttonColors()
         ) {
           Text("检查 / 授予通知权限")
+        }
+      }
+    }
+
+    item { MiuixSectionHeader("灵动岛适配") }
+    item {
+      Card(insideMargin = PaddingValues(16.dp)) {
+        val list = islandSupport
+        if (list == null) {
+          Text("正在检测本机灵动岛能力…", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        } else {
+          list.forEachIndexed { index, item ->
+            if (index > 0) Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Box(
+                Modifier.size(8.dp).background(
+                  when {
+                    !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    item.granted -> MiuixColorTokens.Success
+                    else -> MiuixColorTokens.Warning
+                  },
+                  miuixSquircleShape(4.dp)
+                )
+              )
+              Spacer(Modifier.width(8.dp))
+              Text(item.label, style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium))
+              Spacer(Modifier.weight(1f))
+              Text(
+                when {
+                  !item.supported -> "不支持"
+                  item.granted -> "已就绪"
+                  else -> "待授权"
+                },
+                style = MiuixTheme.textStyles.footnote1.copy(
+                  color = when {
+                    !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    item.granted -> MiuixColorTokens.Success
+                    else -> MiuixColorTokens.Warning
+                  }
+                )
+              )
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(item.note, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+          }
+          val promoted = list.firstOrNull { it.vendor == "android" && it.supported && !it.granted }
+          if (promoted != null) {
+            Spacer(Modifier.height(12.dp))
+            Button(
+              onClick = {
+                TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } }
+              },
+              colors = ButtonDefaults.buttonColorsPrimary()
+            ) {
+              Text("开启实时更新权限")
+            }
+          }
         }
       }
     }
