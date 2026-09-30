@@ -17,7 +17,7 @@ class ServerStore internal constructor(private val preferences: SharedPreference
       val id = it.str("id")
       ServerProfile(id, it.str("name"), it.str("url"), it.str("username"),
         it.optBoolean("autoConnect", true), it.optBoolean("notifications", true), it.str("companionUrl"), it.optBoolean("allowCleartext", false),
-        pluginSecret(id))
+        pluginSecret(id), it.optBoolean("islandHonor", false), it.optBoolean("islandOppoFluidCloud", false))
     }
   } catch (error: Exception) {
     Diagnostics.warn("ServerStore", "profiles 解析失败，已忽略全部服务器资料", error)
@@ -75,6 +75,12 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     }
   }
 
+  /** Update only the island vendor switches for a profile, leaving credentials and other fields intact. */
+  fun updateIslandVendor(profile: ServerProfile) {
+    val existing = profiles().firstOrNull { it.id == profile.id } ?: return
+    save(existing.copy(islandHonor = profile.islandHonor, islandOppoFluidCloud = profile.islandOppoFluidCloud), password = null, credentialUsername = existing.username)
+  }
+
   fun select(id: String, project: String? = null, session: String? = null) {
     preferences.edit().putString("selected", id).putString("selectedProject", project).putString("selectedSession", session).apply()
   }
@@ -96,7 +102,8 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     val json = JSONArray().apply { updated.forEach { item -> put(JSONObject()
       .put("id", item.id).put("name", item.name).put("url", item.url).put("username", item.username)
       .put("autoConnect", item.autoConnect).put("notifications", item.notifications).put("companionUrl", item.companionUrl)
-      .put("allowCleartext", item.allowCleartext)) } }
+      .put("allowCleartext", item.allowCleartext).put("islandHonor", item.islandHonor)
+      .put("islandOppoFluidCloud", item.islandOppoFluidCloud)) } }
     check(secrets.edit().putString(profile.id, encoded).commit()) { "无法保存凭据，请重试" }
     check(preferences.edit().putString("profiles", json.toString()).putString("pluginSecret:${profile.id}", pushKey).commit()) { "无法保存服务器资料，请重试" }
   }
@@ -109,7 +116,8 @@ class ServerStore internal constructor(private val preferences: SharedPreference
       put(JSONObject().put("id", item.id).put("name", item.name).put("url", item.url)
         .put("username", item.username).put("autoConnect", item.autoConnect)
         .put("notifications", item.notifications).put("companionUrl", item.companionUrl)
-        .put("allowCleartext", item.allowCleartext))
+        .put("allowCleartext", item.allowCleartext).put("islandHonor", item.islandHonor)
+        .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
     preferences.edit().putString("profiles", json.toString()).apply()
     secrets.edit().remove(id).apply()

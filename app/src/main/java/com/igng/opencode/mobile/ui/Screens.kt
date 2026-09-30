@@ -1010,8 +1010,8 @@ fun SettingsScreen(
   val pushAvailable = remember(state.serverId) { PushRegistration(context).available() }
   // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
   var islandSupport by remember { mutableStateOf<List<IslandSupport>?>(null) }
-  LaunchedEffect(state.serverId) {
-    islandSupport = withContext(Dispatchers.IO) { IslandRegistry.diagnostics(context) }
+  LaunchedEffect(state.serverId, state.server?.islandHonor, state.server?.islandOppoFluidCloud) {
+    islandSupport = withContext(Dispatchers.IO) { IslandRegistry.diagnostics(context, state.server) }
   }
 
   LazyColumn(
@@ -1131,6 +1131,24 @@ fun SettingsScreen(
             ) {
               Text("开启实时更新权限")
             }
+          }
+          val current = state.server
+          if (current != null) {
+            Spacer(Modifier.height(14.dp))
+            Text("待合作通道开关（需厂商权限）", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+            Spacer(Modifier.height(6.dp))
+            SuperSwitch(
+              title = "荣耀灵动胶囊",
+              summary = "需荣耀开发者企业认证与白名单",
+              checked = current.islandHonor,
+              onCheckedChange = { controller.setIslandVendor(current.copy(islandHonor = it)) }
+            )
+            SuperSwitch(
+              title = "OPPO 流体云（ColorOS 15）",
+              summary = "需开放平台 serviceId；ColorOS 16 走标准通道",
+              checked = current.islandOppoFluidCloud,
+              onCheckedChange = { controller.setIslandVendor(current.copy(islandOppoFluidCloud = it)) }
+            )
           }
         }
       }

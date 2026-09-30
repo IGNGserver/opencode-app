@@ -133,6 +133,11 @@ class MobileController private constructor(private val appContext: Context) {
     mutable.update { it.copy(profiles = store.profiles()) }
     if (connect) connect(profile.id)
   }
+  /** 持久化待合作灵动岛通道开关（荣耀 / OPPO 流体云），不触发重连。 */
+  fun setIslandVendor(profile: ServerProfile) {
+    store.updateIslandVendor(profile)
+    mutable.update { it.copy(profiles = store.profiles()) }
+  }
   fun deleteServer(id: String) {
     // Capture the profile before deletion so the companion can be told to stop delivering (A08).
     val leaving = store.profiles().firstOrNull { it.id == id }
