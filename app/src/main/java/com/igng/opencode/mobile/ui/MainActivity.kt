@@ -13,6 +13,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,16 +32,11 @@ import androidx.compose.ui.unit.sp
 import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.push.PushRegistration
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.Flow
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-
-private enum class RootTab(val label: String) {
-  HOME("工作台"), SESSIONS("会话"), SETTINGS("设置")
-}
 
 class MainActivity : ComponentActivity() {
   private var deepLink by mutableStateOf<Pair<String, String>?>(null)
@@ -97,25 +93,36 @@ class MainActivity : ComponentActivity() {
         }
       }
 
-      // 预见式返回 (Predictive Back Gesture) 动力学状态
+      // 统一的应用内返回栈：对话详情 → 所属标签页 → 工作台 → 交给系统退出。
+      // 层级判定集中在 AppBackStack，便于无设备单测“侧滑只回上一级、不回桌面”。
+      // 预见式返回的进度直接驱动详情层位移，实时预览上一级；提交后才切换状态。
+      val canNavigateBack = AppBackStack.canGoBack(inChatDetail, currentTab)
       val backProgress = remember { Animatable(0f) }
-      PredictiveBackHandler(enabled = inChatDetail) { progressFlow ->
+      var gestureActive by remember { mutableStateOf(false) }
+
+      // 非手势触发的开关（点返回按钮、打开会话）走补间动画；手势进行中由手势进度驱动。
+      LaunchedEffect(inChatDetail, gestureActive) {
+        if (!gestureActive) backProgress.animateTo(0f, tween(220))
+      }
+
+      PredictiveBackHandler(enabled = canNavigateBack) { progressFlow ->
+        gestureActive = true
         try {
-          progressFlow.collect { backEvent ->
-            backProgress.snapTo(backEvent.progress)
-          }
-          // 手势完成返回
-          inChatDetail = false
+          progressFlow.collect { backEvent -> backProgress.snapTo(backEvent.progress.coerceIn(0f, 1f)) }
+          // 手势提交：执行真正的层级返回。
+          val (nextDetail, nextTab) = AppBackStack.back(inChatDetail, currentTab)
           backProgress.snapTo(0f)
+          inChatDetail = nextDetail
+          currentTab = nextTab
         } catch (e: CancellationException) {
-          // 手势取消，物理回弹归零
+          // 手势取消：物理回弹归零，不改变层级。
           backProgress.animateTo(
             targetValue = 0f,
-            animationSpec = spring(
-              dampingRatio = Spring.DampingRatioMediumBouncy,
-              stiffness = Spring.StiffnessMedium
-            )
+            animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium)
           )
+          throw e
+        } finally {
+          gestureActive = false
         }
       }
 
@@ -263,88 +270,76 @@ class MainActivity : ComponentActivity() {
               }
             }
 
-            // 主视图内容容器 (结合预见式返回缩放与平滑渐变)
-            val currentProgress = backProgress.value
-            Box(
-              Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .graphicsLayer {
-                  if (inChatDetail && currentProgress > 0f) {
-                    // 跟随手指返回进度的轻微等比微缩与位移
-                    val scale = 1f - (currentProgress * 0.08f)
-                    scaleX = scale
-                    scaleY = scale
-                    translationX = currentProgress * 80f
-                    alpha = 1f - (currentProgress * 0.25f)
+            // 主视图内容容器：基层常驻 + 详情层随返回手势滑动，才能实时预览上一级。
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+              val progress = backProgress.value
+
+              // 基层：当前标签页内容。
+              Box(
+                Modifier
+                  .fillMaxSize()
+                  .graphicsLayer {
+                    // 详情层回退时基层轻微放大，形成 MIUIX 层次纵深。
+                    if (inChatDetail) {
+                      val scale = 1f - progress * 0.08f
+                      scaleX = scale
+                      scaleY = scale
+                    }
                   }
+              ) {
+                when (currentTab) {
+                  RootTab.HOME -> HomeScreen(
+                    state = state,
+                    controller = controller,
+                    onOpen = { sessionId ->
+                      controller.selectSession(sessionId)
+                      inChatDetail = true
+                    },
+                    onServers = { showingServersSheet = true },
+                    onSessions = { currentTab = RootTab.SESSIONS },
+                    scrollBehavior = homeScrollBehavior
+                  )
+                  RootTab.SESSIONS -> SessionsScreen(
+                    state = state,
+                    controller = controller,
+                    onOpen = { sessionId ->
+                      controller.selectSession(sessionId)
+                      inChatDetail = true
+                    }
+                  )
+                  RootTab.SETTINGS -> SettingsScreen(
+                    state = state,
+                    controller = controller,
+                    dark = dark,
+                    onDark = {
+                      dark = it
+                      preferences.edit().putBoolean("dark", it).apply()
+                    },
+                    onNotifications = {
+                      if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    },
+                    onManageServers = { showingServersSheet = true }
+                  )
                 }
-            ) {
-              AnimatedContent(
-                targetState = inChatDetail,
-                label = "DetailTransition",
-                transitionSpec = {
-                  if (targetState) {
-                    (slideInHorizontally(
-                      animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
-                    ) { width -> width } + fadeIn()).togetherWith(
-                      slideOutHorizontally(
-                        animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
-                      ) { width -> -width / 4 } + fadeOut()
-                    )
-                  } else {
-                    (slideInHorizontally(
-                      animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
-                    ) { width -> -width / 4 } + fadeIn()).togetherWith(
-                      slideOutHorizontally(
-                        animationSpec = spring(dampingRatio = 0.85f, stiffness = 400f)
-                      ) { width -> width } + fadeOut()
-                    )
-                  }
-                }
-              ) { isDetail ->
-                if (isDetail) {
+              }
+
+              // 详情层：对话详情覆盖在基层之上，随返回手势进度右移露出上一级。
+              if (inChatDetail || gestureActive || progress > 0.01f) {
+                Box(
+                  Modifier
+                    .fillMaxSize()
+                    .background(MiuixTheme.colorScheme.surface)
+                    .graphicsLayer {
+                      translationX = progress * size.width
+                      alpha = 1f - progress * 0.15f
+                    }
+                ) {
                   ChatScreen(
                     state = state,
                     controller = controller,
                     drafts = drafts,
                     onBack = { inChatDetail = false }
                   )
-                } else {
-                  when (currentTab) {
-                    RootTab.HOME -> HomeScreen(
-                      state = state,
-                      controller = controller,
-                      onOpen = { sessionId ->
-                        controller.selectSession(sessionId)
-                        inChatDetail = true
-                      },
-                      onServers = { showingServersSheet = true },
-                      onSessions = { currentTab = RootTab.SESSIONS },
-                      scrollBehavior = homeScrollBehavior
-                    )
-                    RootTab.SESSIONS -> SessionsScreen(
-                      state = state,
-                      controller = controller,
-                      onOpen = { sessionId ->
-                        controller.selectSession(sessionId)
-                        inChatDetail = true
-                      }
-                    )
-                    RootTab.SETTINGS -> SettingsScreen(
-                      state = state,
-                      controller = controller,
-                      dark = dark,
-                      onDark = {
-                        dark = it
-                        preferences.edit().putBoolean("dark", it).apply()
-                      },
-                      onNotifications = {
-                        if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                      },
-                      onManageServers = { showingServersSheet = true }
-                    )
-                  }
                 }
               }
 
@@ -356,41 +351,45 @@ class MainActivity : ComponentActivity() {
               }
             }
           }
-        }
 
-        // 全局消息提示弹窗 (MIUIX SuperDialog)
-        val msg = globalMessage
-        if (msg != null) {
-          SuperDialog(
-            title = "提示",
-            show = true,
-            onDismissRequest = { globalMessage = null }
-          ) {
-            Column(Modifier.padding(top = 8.dp)) {
-              Text(msg, style = MiuixTheme.textStyles.body1)
-              Spacer(Modifier.height(14.dp))
-              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(
-                  text = "确定",
-                  colors = ButtonDefaults.textButtonColorsPrimary(),
-                  onClick = { globalMessage = null }
-                )
+          // 全局消息提示弹窗 (MIUIX SuperDialog)。
+          // 必须声明在 Scaffold 的内容作用域内：MIUIX 弹层由 Scaffold provide 的
+          // LocalDialogStates / LocalRootDialogStates 驱动，且只由 Scaffold 自带的
+          // MiuixPopupHost 渲染。声明在 Scaffold 之外会落进无人渲染的默认空列表，
+          // 导致“添加服务器”等弹层点击后没有任何反应。
+          val msg = globalMessage
+          if (msg != null) {
+            SuperDialog(
+              title = "提示",
+              show = true,
+              onDismissRequest = { globalMessage = null }
+            ) {
+              Column(Modifier.padding(top = 8.dp)) {
+                Text(msg, style = MiuixTheme.textStyles.body1)
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                  TextButton(
+                    text = "确定",
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                    onClick = { globalMessage = null }
+                  )
+                }
               }
             }
           }
-        }
 
-        // 服务器管理 BottomSheet
-        if (showingServersSheet) {
-          ServersModal(
-            state = state,
-            controller = controller,
-            onDismiss = { showingServersSheet = false },
-            onConnected = {
-              showingServersSheet = false
-              currentTab = RootTab.HOME
-            }
-          )
+          // 服务器管理 BottomSheet（同样必须在 Scaffold 内容作用域内）。
+          if (showingServersSheet) {
+            ServersModal(
+              state = state,
+              controller = controller,
+              onDismiss = { showingServersSheet = false },
+              onConnected = {
+                showingServersSheet = false
+                currentTab = RootTab.HOME
+              }
+            )
+          }
         }
       }
     }

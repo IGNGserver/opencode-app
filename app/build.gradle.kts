@@ -56,7 +56,11 @@ android {
 tasks.withType<Test>().configureEach { workingDir = rootDir }
 dependencies {
   implementation("androidx.core:core-ktx:1.17.0")
-  implementation("androidx.activity:activity-compose:1.10.1")
+  // Must stay >= 1.12.0: MIUIX popups register androidx.navigationevent NavigationBackHandlers,
+  // and only ComponentActivity from Activity 1.12+ implements NavigationEventDispatcherOwner
+  // (and sets the view-tree owner). Without it every MIUIX SuperDialog/SuperBottomSheet throws
+  // "No NavigationEventDispatcher was provided via LocalNavigationEventDispatcherOwner".
+  implementation("androidx.activity:activity-compose:1.12.0")
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
   implementation(platform("androidx.compose:compose-bom:2024.12.01"))
   implementation("androidx.compose.ui:ui")
