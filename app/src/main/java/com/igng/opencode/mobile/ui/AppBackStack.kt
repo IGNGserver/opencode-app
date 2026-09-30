@@ -5,6 +5,13 @@ internal enum class RootTab(val label: String) {
   HOME("工作台"), SESSIONS("会话"), SETTINGS("设置")
 }
 
+/** The predictive back transition type for in-app navigation. */
+internal enum class BackStage {
+  NONE,
+  DETAIL_TO_TAB,
+  TAB_TO_HOME
+}
+
 /**
  * The single in-app back stack shared by the UI and its unit tests.
  *
@@ -15,6 +22,13 @@ internal enum class RootTab(val label: String) {
 internal object AppBackStack {
   /** Whether an in-app step exists; when false the system should handle back (leave the app). */
   fun canGoBack(detail: Boolean, tab: RootTab): Boolean = detail || tab != RootTab.HOME
+
+  /** Identifies what stage the back gesture represents. */
+  fun backStage(detail: Boolean, tab: RootTab): BackStage = when {
+    detail -> BackStage.DETAIL_TO_TAB
+    tab != RootTab.HOME -> BackStage.TAB_TO_HOME
+    else -> BackStage.NONE
+  }
 
   /**
    * Applies exactly one back step. Only call when [canGoBack] is true.
