@@ -14,17 +14,21 @@ class AppBackStackTest {
   @Test
   fun backFromHomeDefersToSystem() {
     assertFalse(AppBackStack.canGoBack(detail = false, tab = RootTab.HOME))
+    assertEquals(BackStage.NONE, AppBackStack.backStage(detail = false, tab = RootTab.HOME))
   }
 
   @Test
   fun nonHomeTabCanGoBack() {
     assertTrue(AppBackStack.canGoBack(detail = false, tab = RootTab.SESSIONS))
+    assertEquals(BackStage.TAB_TO_HOME, AppBackStack.backStage(detail = false, tab = RootTab.SESSIONS))
     assertTrue(AppBackStack.canGoBack(detail = false, tab = RootTab.SETTINGS))
+    assertEquals(BackStage.TAB_TO_HOME, AppBackStack.backStage(detail = false, tab = RootTab.SETTINGS))
   }
 
   @Test
   fun openDetailCanGoBack() {
     assertTrue(AppBackStack.canGoBack(detail = true, tab = RootTab.HOME))
+    assertEquals(BackStage.DETAIL_TO_TAB, AppBackStack.backStage(detail = true, tab = RootTab.HOME))
   }
 
   @Test
