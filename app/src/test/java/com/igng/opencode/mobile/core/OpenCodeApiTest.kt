@@ -14,6 +14,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class OpenCodeApiTest {
@@ -363,5 +364,31 @@ class OpenCodeApiTest {
     val online = offline.copy(connected = true, cached = false)
     assertTrue(online.connected)
     assertFalse(online.cached)
+  }
+
+  /**
+   * Adding a server against an address that answers HTTP 200 without a JSON object (a web UI, a
+   * proxy page, plain text, an empty body) must surface a friendly Chinese error instead of the
+   * raw org.json message "Value ... of type java.lang.String cannot be converted to JSONObject".
+   */
+  @Test fun nonJsonSuccessResponsesReportFriendlyErrors() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html"))
+      server.enqueue(MockResponse().setBody("OK"))
+      server.enqueue(MockResponse().setResponseCode(200))
+      suspend fun healthError(): Throwable? = OpenCodeApi(
+        ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret"
+      ).let { api -> runCatching { api.health() }.exceptionOrNull() }
+      val html = healthError()
+      assertTrue("expected IOException, got $html", html is IOException && html !is ApiException)
+      assertTrue(html!!.message!!, html.message!!.contains("服务器返回的是网页"))
+      assertFalse(html.message!!, html.message!!.contains("cannot be converted"))
+      val text = healthError()
+      assertTrue(text is IOException && !text.message!!.contains("cannot be converted"))
+      assertTrue(text!!.message!!, text.message!!.contains("不是有效 JSON"))
+      val empty = healthError()
+      assertTrue(empty is IOException)
+      assertTrue(empty!!.message!!, empty.message!!.contains("空响应"))
+    }
   }
 }

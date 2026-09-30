@@ -22,6 +22,7 @@ import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -193,11 +194,32 @@ class OpenCodeApi(
   // Parsing runs on the IO dispatcher: JSONObject/JSONArray construction of a large transcript is
   // CPU-bound and the controller calls these from its Main-immediate scope (A15).
   private suspend fun obj(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONObject =
-    withContext(Dispatchers.IO) { JSONObject(request("GET", path, directory, query)) }
+    withContext(Dispatchers.IO) { jsonObject(request("GET", path, directory, query)) }
   private suspend fun arr(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONArray =
-    withContext(Dispatchers.IO) { JSONArray(request("GET", path, directory, query)) }
+    withContext(Dispatchers.IO) { jsonArray(request("GET", path, directory, query)) }
   private fun dataObject(value: JSONObject): JSONObject = value.optJSONObject("data") ?: value
   private fun dataArray(value: JSONObject): JSONArray = value.optJSONArray("data") ?: JSONArray()
+
+  /**
+   * HTTP 200 bodies are parsed here. When the configured address is not an OpenCode API — a web UI
+   * returning SPA HTML, a login/proxy page, or an empty body — org.json raises raw errors such as
+   * "Value ... of type java.lang.String cannot be converted to JSONObject", which used to leak
+   * verbatim into the add-server form. Translate them into a specific, actionable message instead.
+   */
+  private fun jsonObject(raw: String): JSONObject = try { JSONObject(raw) } catch (error: JSONException) { throw invalidJsonResponse(raw, error) }
+  private fun jsonArray(raw: String): JSONArray = try { JSONArray(raw) } catch (error: JSONException) { throw invalidJsonResponse(raw, error) }
+  private fun invalidJsonResponse(raw: String, cause: JSONException): IOException {
+    val trimmed = raw.trim()
+    val reason = when {
+      trimmed.isEmpty() -> "服务器返回了空响应，请确认地址指向 OpenCode 服务端口"
+      trimmed.startsWith("<") -> "服务器返回的是网页而非 OpenCode 接口数据，请确认填写的是 API 地址（不要使用网页界面地址）"
+      else -> "服务器返回的数据不是有效 JSON，可能被代理拦截或该地址不是 OpenCode 服务"
+    }
+    // cause.message is deliberately not repeated: Android's org.json embeds the whole offending
+    // body in the message, which would flood the dialog. The cause stays chained for diagnostics.
+    return IOException(reason, cause)
+  }
+
   private suspend fun dataObjects(
     path: String,
     query: Map<String, String> = emptyMap(),
@@ -221,7 +243,7 @@ class OpenCodeApi(
       val raw = request("GET", path, query = pageQuery)
       totalChars += raw.length
       if (totalChars > MAX_RESPONSE_CHARS * 2L) throw IOException("列表数据过大，未使用不完整结果")
-      val page = JSONObject(raw)
+      val page = jsonObject(raw)
       result += page.optJSONArray("data")?.objects().orEmpty()
       if (result.size > MAX_PAGE_ITEMS) {
         throw IOException("列表超过 $MAX_PAGE_ITEMS 条，未使用不完整结果")
@@ -313,7 +335,7 @@ class OpenCodeApi(
   }
   }
   suspend fun createSession(directory: String, title: String): Session = when (ensureProtocol()) {
-    ServerProtocol.V1 -> JSONObject(request("POST", "session", directory, body = JSONObject().put("title", title))).toSession()
+    ServerProtocol.V1 -> jsonObject(request("POST", "session", directory, body = JSONObject().put("title", title))).toSession()
     ServerProtocol.V2 -> dataObject(requestObject("POST", "api/session", body = JSONObject().put("location", JSONObject().put("directory", directory)))).toSession()
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }
@@ -332,7 +354,7 @@ class OpenCodeApi(
     }
   }
   suspend fun forkSession(session: Session): Session = when (ensureProtocol()) {
-    ServerProtocol.V1 -> JSONObject(request("POST", "session/${segment(session.id)}/fork", session.directory)).toSession()
+    ServerProtocol.V1 -> jsonObject(request("POST", "session/${segment(session.id)}/fork", session.directory)).toSession()
     ServerProtocol.V2 -> unsupported("OpenCode V2 当前没有会话 Fork 接口")
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }
@@ -345,7 +367,7 @@ class OpenCodeApi(
   }
   suspend fun share(session: Session): String {
     if (ensureProtocol() == ServerProtocol.V2) unsupported("OpenCode V2 当前没有分享接口")
-    val response = JSONObject(request("POST", "session/${segment(session.id)}/share", session.directory))
+    val response = jsonObject(request("POST", "session/${segment(session.id)}/share", session.directory))
     return response.obj("share").str("url").ifBlank { response.str("share") }.ifBlank { response.str("url") }
   }
   suspend fun unshare(session: Session) {
@@ -577,7 +599,7 @@ class OpenCodeApi(
     awaitClose { source.cancel() }
   }
 
-  private suspend fun requestObject(method: String, path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) { JSONObject(request(method, path, body = body)) }
+  private suspend fun requestObject(method: String, path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) { jsonObject(request(method, path, body = body)) }
 
   private fun unsupported(message: String): Nothing = throw ApiException(501, message)
 
