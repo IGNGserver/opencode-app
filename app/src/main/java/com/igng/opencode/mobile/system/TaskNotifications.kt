@@ -22,6 +22,7 @@ import com.igng.opencode.mobile.core.ServerProfile
 import com.igng.opencode.mobile.core.Session
 import com.igng.opencode.mobile.core.TaskPhase
 import com.igng.opencode.mobile.core.TaskState
+import com.igng.opencode.mobile.core.TaskSummary
 import com.igng.opencode.mobile.ui.MainActivity
 import org.json.JSONObject
 
@@ -34,14 +35,18 @@ class TaskNotifications(private val context: Context) {
     const val RUNNING = "task_running"
     const val ATTENTION = "task_attention"
     const val COMPLETED = "task_completed"
+    const val SUMMARY = "task_summary"
     fun notificationId(serverId: String, sessionId: String): Int = "${serverId}:$sessionId".hashCode() and 0x7fffffff
     /** Separate id space for server-pushed notifications so they never cancel an in-app one. */
     fun pushNotificationId(serverId: String, sessionId: String): Int = "push:$serverId:$sessionId".hashCode() and 0x7fffffff
+    /** One server-wide island/summary notification per server. */
+    fun summaryId(serverId: String): Int = "summary:$serverId".hashCode() and 0x7fffffff
   }
   init {
     manager.createNotificationChannel(NotificationChannel(RUNNING, "正在运行", NotificationManager.IMPORTANCE_DEFAULT))
     manager.createNotificationChannel(NotificationChannel(ATTENTION, "需要处理", NotificationManager.IMPORTANCE_HIGH))
     manager.createNotificationChannel(NotificationChannel(COMPLETED, "任务结果", NotificationManager.IMPORTANCE_DEFAULT))
+    manager.createNotificationChannel(NotificationChannel(SUMMARY, "任务总览", NotificationManager.IMPORTANCE_DEFAULT))
   }
   private fun allowed(): Boolean = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
   private fun open(serverId: String, sessionId: String): PendingIntent {
@@ -109,10 +114,11 @@ class TaskNotifications(private val context: Context) {
 
   /** Minimal, persistent notification for the monitoring foreground service (A09). It is separate
    *  from the per-session result notifications so removing the foreground state never removes a
-   *  real task result. */
-  fun buildMonitoring(): Notification = NotificationCompat.Builder(context, RUNNING)
+   *  real task result. Its text mirrors the server-wide island summary when available. */
+  fun buildMonitoring(summary: TaskSummary? = null): Notification = NotificationCompat.Builder(context, RUNNING)
     .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
-    .setContentTitle("OpenCode 任务监控中").setContentText("仅跟踪当前服务器；切换后结束本地监控")
+    .setContentTitle("OpenCode 任务监控中")
+    .setContentText(summary?.text ?: "仅跟踪当前服务器；切换后结束本地监控")
     .setOngoing(true).setShowWhen(false).setCategory(NotificationCompat.CATEGORY_SERVICE)
     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
     .build()
@@ -133,6 +139,36 @@ class TaskNotifications(private val context: Context) {
     manager.cancel(notificationId(serverId, sessionId))
     manager.cancel(pushNotificationId(serverId, sessionId))
   }
+
+  /**
+   * Server-wide island/Live Update summary. `contentTitle` is required for promotion; when counts are
+   * all zero the notification is removed so the status chip does not linger.
+   */
+  fun buildSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?): Notification {
+    val text = summary.text.orEmpty()
+    val builder = NotificationCompat.Builder(context, SUMMARY)
+      .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
+      .setContentTitle("OpenCode 任务总览").setContentText(text)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+      .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
+      .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setRequestPromotedOngoing(true)
+      .setShortCriticalText(summary.shortText)
+    targetSessionId?.let { builder.setContentIntent(open(profile.id, it)) }
+    val notification = builder.build()
+    XiaomiIslandAdapter(context).extend(notification, "OpenCode 任务总览", text, running = summary.running > 0)
+    return notification
+  }
+
+  fun showSummary(profile: ServerProfile, summary: TaskSummary, targetSessionId: String?) {
+    if (!allowed() || !profile.notifications || summary.isEmpty) {
+      manager.cancel(summaryId(profile.id))
+      return
+    }
+    manager.notify(summaryId(profile.id), buildSummary(profile, summary, targetSessionId))
+  }
+  fun cancelSummary(serverId: String) = manager.cancel(summaryId(serverId))
 }
 
 internal class XiaomiIslandAdapter(private val context: Context) {
