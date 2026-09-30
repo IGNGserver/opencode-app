@@ -127,10 +127,13 @@ internal object VivoIslandAdapter : IslandAdapter {
   override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
     if (!isVivo()) return
     val extras = Bundle()
-    // 0=创建，1=更新，2=结束。持续通知始终以“创建/更新”呈现，结束交由取消通知完成。
-    extras.putInt("notification.superx.operation", if (running) 1 else 0)
+    // 0=创建，1=更新，2=结束。客户端本地接口没有“首次创建”的显式信号，采用 operation=1（更新），
+    // 系统在不存在活动时会按创建处理；真正结束由取消通知完成。若真机验证要求严格的 0→1 序列，
+    // 需由持有活动状态的调用方传入 operation。
+    extras.putInt("notification.superx.operation", 1)
     extras.putBoolean("notification.superx.showNotify", true)
     extras.putInt("notification.superx.template", 1)
+    // 官方示例使用 HEALTH_REGISTER 等垂域场景值；TASK 需在 vivo 开放平台申请时确认。
     extras.putString("notification.superx.scene", "TASK")
     val baseInfo = Bundle().apply {
       putParcelable("notification.superx.baseInfos.icon", Icon.createWithResource(context, R.drawable.ic_notification))
