@@ -33,7 +33,6 @@ import com.igng.opencode.mobile.core.MobileController
 import com.igng.opencode.mobile.push.PushRegistration
 import kotlinx.coroutines.CancellationException
 import top.yukonga.miuix.kmp.basic.*
-import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -359,20 +358,23 @@ class MainActivity : ComponentActivity() {
                 .statusBarsPadding()
                 .padding(top = 16.dp)
             )
-          }
-        }
 
-        // 服务器管理 BottomSheet（必须在 Scaffold 内容作用域内）。
-        if (showingServersSheet) {
-          ServersModal(
-            state = state,
-            controller = controller,
-            onDismiss = { showingServersSheet = false },
-            onConnected = {
-              showingServersSheet = false
-              currentTab = RootTab.HOME
+            // 服务器管理 BottomSheet：必须留在 Scaffold 内容作用域内。
+            // MIUIX 的 SuperDialog/SuperBottomSheet 只注册进 Scaffold 内部 provide 的弹层列表，
+            // 并只由 Scaffold 自带的 MiuixPopupHost 渲染；声明在 Scaffold 之外会静默落进无人渲染
+            // 的默认列表，表现为“点击添加服务器没有任何反应”（#15 修过，#21 重构 Dock 时又移了出去）。
+            if (showingServersSheet) {
+              ServersModal(
+                state = state,
+                controller = controller,
+                onDismiss = { showingServersSheet = false },
+                onConnected = {
+                  showingServersSheet = false
+                  currentTab = RootTab.HOME
+                }
+              )
             }
-          )
+          }
         }
       }
     }

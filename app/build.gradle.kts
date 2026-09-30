@@ -53,7 +53,11 @@ android {
   testOptions { unitTests.isReturnDefaultValues = true }
 }
 // Unit tests read the shared cross-language contract from the repository root.
-tasks.withType<Test>().configureEach { workingDir = rootDir }
+tasks.withType<Test>().configureEach {
+  workingDir = rootDir
+  // PopupScopeRegressionTest 直接扫描 UI 源码，源码变化必须触发重跑而不是 UP-TO-DATE。
+  inputs.dir("src/main/java")
+}
 dependencies {
   implementation("androidx.core:core-ktx:1.17.0")
   // Must stay >= 1.12.0: MIUIX popups register androidx.navigationevent NavigationBackHandlers,
