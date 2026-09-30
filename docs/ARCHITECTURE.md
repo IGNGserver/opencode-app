@@ -9,7 +9,7 @@
 - `core/KeystoreCipher.kt`: `ServerStore`/`OfflineCache` 共用的 AndroidKeyStore AES-GCM 加解密。
 - `core/PairLink.kt`: 官方 `opencode pair` 链接解析（强制 HTTPS）。
 - `core/Http.kt` / `core/Diagnostics.kt`: 进程级 OkHttp 连接池/调度器；轻量日志。
-- `ui/`: Fluent 2 风格页面和不同消息 Part 的渲染；`MainActivity` 负责根导航与深链。
+- `ui/`: 小米 HyperOS / MIUIX 风格页面、Liquid Glass 悬浮质感与不同消息 Part 的渲染；`MainActivity` 负责根导航与深链。
 - `system/`: 通知 Channel、Android Live Updates 请求、小米岛参数、任务前台服务与通知操作。
 - `push/`: 可选 FCM 客户端、设备注册/注销，以及推送消息 HMAC 校验（仅 v3，逐字段长度前缀 + 新鲜度 + 设备绑定 + 持久序号）；加密注销队列在 App 存活/启动时重试。
 - `companion/`: OpenCode 插件与只传递任务元数据的 FCM 伴随服务；插件先持久化有序事件，companion 原子提交设备/任务状态/去重/待投递队列；同会话最新待发状态覆盖旧状态，单文件单进程写入。

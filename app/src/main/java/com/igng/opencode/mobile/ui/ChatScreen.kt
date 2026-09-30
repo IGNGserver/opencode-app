@@ -852,6 +852,7 @@ private fun MiuixLiquidComposer(
             onValueChange = { editDraft(drafts, draftKey, it) },
             modifier = Modifier.fillMaxWidth(),
             textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(MiuixTheme.colorScheme.primary),
             maxLines = 5
           )
         }

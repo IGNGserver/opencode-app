@@ -1,6 +1,6 @@
 # OpenCode Mobile
 
-原生 Android OpenCode 控制端。Kotlin + Jetpack Compose 界面采用 Fluent 2 的信息层级、蓝色强调、浅色中性表面和紧凑的任务卡片。App 直接访问用户自己的 OpenCode Server，聊天内容不经过伴随服务。
+原生 Android OpenCode 控制端。Kotlin + Jetpack Compose 界面采用小米 HyperOS / MIUIX 设计规范，引入连续曲率 Squircle、科技蓝语义调色板与 Liquid Glass 液态玻璃交互层。App 直接访问用户自己的 OpenCode Server，聊天内容不经过伴随服务。
 
 ## 功能
 
