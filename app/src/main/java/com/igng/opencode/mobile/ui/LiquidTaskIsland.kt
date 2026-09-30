@@ -13,24 +13,26 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.igng.opencode.mobile.core.TaskPhase
-import com.igng.opencode.mobile.core.TaskState
+import com.igng.opencode.mobile.core.TaskSummary
 import com.kyant.backdrop.Backdrop
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 类似于灵动岛/超级岛的液态玻璃实时任务状态指示舱
+ * 类似于灵动岛/超级岛的液态玻璃实时任务状态指示舱。
+ *
+ * 内容为全服务器范围的统一摘要（运行中 / 未读已完成 / 待回复 / 失败），与系统通知、小米超级岛
+ * 共用同一份口径（见 `core/TaskSummary.kt`），不再是单个会话的一行详情。
  */
 @Composable
 fun LiquidTaskIsland(
-  task: TaskState?,
+  summary: TaskSummary?,
   modifier: Modifier = Modifier,
   isDark: Boolean = false,
   backdrop: Backdrop? = LocalBackdrop.current,
   onClick: (() -> Unit)? = null
 ) {
-  val isVisible = task != null && task.phase != TaskPhase.IDLE
+  val isVisible = summary != null && !summary.isEmpty
 
   AnimatedVisibility(
     visible = isVisible,
@@ -40,10 +42,11 @@ fun LiquidTaskIsland(
       slideOutVertically(spring(stiffness = Spring.StiffnessHigh)) { -it },
     modifier = modifier
   ) {
-    if (task != null) {
+    if (summary != null) {
       val pillShape = remember { miuixSquircleShape(LiquidGlassTokens.CapsuleCornerRadius) }
-      val isRunning = task.phase in TaskState.RUNNING_PHASES
-      val isWaiting = task.phase in TaskState.WAITING_PHASES
+      val isRunning = summary.running > 0
+      val isWaiting = summary.waiting > 0
+      val isFailed = summary.failed > 0
 
       val infiniteTransition = rememberInfiniteTransition(label = "pulse")
       val pulseAlpha by infiniteTransition.animateFloat(
@@ -57,19 +60,10 @@ fun LiquidTaskIsland(
       )
 
       val statusColor: Color = when {
-        isRunning -> MiuixTheme.colorScheme.primary
+        isFailed -> MiuixColorTokens.Error
         isWaiting -> MiuixColorTokens.Warning
-        task.phase == TaskPhase.COMPLETED -> MiuixColorTokens.Success
-        task.phase == TaskPhase.FAILED -> MiuixColorTokens.Error
-        else -> MiuixTheme.colorScheme.primary
-      }
-
-      val statusText: String = when {
-        isRunning -> task.detail.ifBlank { "Agent 正在执行任务…" }
-        isWaiting -> "等待用户审批或应答"
-        task.phase == TaskPhase.COMPLETED -> "任务执行完成"
-        task.phase == TaskPhase.FAILED -> "任务执行失败"
-        else -> "就绪"
+        isRunning -> MiuixTheme.colorScheme.primary
+        else -> MiuixColorTokens.Success
       }
 
       Box(
@@ -107,7 +101,7 @@ fun LiquidTaskIsland(
               )
           )
           Text(
-            text = statusText,
+            text = summary.text.orEmpty(),
             style = MiuixTheme.textStyles.footnote2.copy(
               fontWeight = FontWeight.Medium,
               color = MiuixTheme.colorScheme.onSurface

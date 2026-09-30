@@ -1056,7 +1056,7 @@ fun SettingsScreen(
         Text("系统通知与灵动岛 / 超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
         Spacer(Modifier.height(4.dp))
         Text(
-          "支持 Android 实时进度条与小米 HyperOS 超级岛 / 流体胶囊展示。",
+          "支持 Android 实时进度条与小米 HyperOS 超级岛 / 流体胶囊展示，常驻显示全服务器任务的「运行中 / 已完成 / 待回复 / 失败」计数。",
           style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
         )
         Spacer(Modifier.height(10.dp))

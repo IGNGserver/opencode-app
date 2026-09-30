@@ -39,7 +39,13 @@ data class MobileState(
   val agent: String? = null, val model: ModelChoice? = null,
   val files: List<FileNode> = emptyList(), val filePath: String = ".", val fileText: String? = null, val fileBinary: Boolean = false,
   val searchResults: List<String> = emptyList(),
-  val supportsSavedPermissions: Boolean = false, val savedPermissions: List<SavedPermission>? = null
+  val supportsSavedPermissions: Boolean = false, val savedPermissions: List<SavedPermission>? = null,
+  /** 已被用户查看过、不再计入“未读已完成/失败”的会话 id（本会话内有效）。 */
+  val acknowledged: Set<String> = emptySet(),
+  /** 全服务器范围的任务计数，由 [tasks] 与 [acknowledged] 派生，供灵动岛与系统通知复用。 */
+  val summary: TaskSummary = TaskSummary.EMPTY,
+  /** 存在未读已完成/失败时，灵动岛点击应跳转的会话 id。 */
+  val summaryTargetId: String? = null
 ) {
   val server: ServerProfile? get() = profiles.firstOrNull { it.id == serverId }
   val project: Project? get() = projects.firstOrNull { it.id == projectId }
@@ -53,6 +59,7 @@ class MobileController private constructor(private val appContext: Context) {
       "permission.asked", "question.asked", "permission.replied", "permission.rejected",
       "question.replied", "question.rejected"
     )
+    private val TERMINAL_PHASES = setOf(TaskPhase.COMPLETED, TaskPhase.FAILED)
     @Volatile private var instance: MobileController? = null
     fun get(context: Context): MobileController = instance ?: synchronized(this) {
       instance ?: MobileController(context.applicationContext).also { instance = it }
@@ -60,6 +67,15 @@ class MobileController private constructor(private val appContext: Context) {
     /** Control-plane reconciliation cadence while the SSE stream is up. */
     private const val RECONCILE_INTERVAL_MILLIS = 45_000L
   }
+  /**
+   * Recomputes the server-wide island summary. A session's unread terminal state keeps counting until
+   * the user opens that session ([selectSession] acknowledges it), so “已完成/失败” means “未读”。
+   */
+  private fun withSummary(state: MobileState): MobileState = state.copy(
+    summary = TaskSummary.of(state.tasks, state.acknowledged),
+    summaryTargetId = state.tasks.values
+      .firstOrNull { it.phase in TERMINAL_PHASES && it.sessionId !in state.acknowledged }?.sessionId
+  )
   private val store = ServerStore(appContext)
   private val cache = OfflineCache(appContext)
   private val notifications = TaskNotifications(appContext)
@@ -84,7 +100,18 @@ class MobileController private constructor(private val appContext: Context) {
   private var messageSequence = 0L
   private var reconcile: Job? = null
 
-  init { com.igng.opencode.mobile.push.PushRevocations(appContext).retry(); if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
+  init {
+    com.igng.opencode.mobile.push.PushRevocations(appContext).retry()
+    // Single publisher for the server-wide island summary, so the system notification never drifts
+    // from the in-app island: both read the same derived `summary` on every state emission.
+    scope.launch { state.collect { publishSummary(it) } }
+    if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!)
+  }
+  private fun publishSummary(state: MobileState) {
+    val profile = state.server ?: return
+    // showSummary cancels the notification itself when the summary is empty.
+    notifications.showSummary(profile, state.summary, state.summaryTargetId)
+  }
   fun credentials(serverId: String): ServerCredentials = store.credentials(serverId)
   fun deviceId(): String = store.deviceId()
   suspend fun testServer(profile: ServerProfile, credentials: ServerCredentials): String {
@@ -254,12 +281,12 @@ class MobileController private constructor(private val appContext: Context) {
       val nextQuestions = (questions + keptQuestions).distinctBy { it.id }
       nextPermissions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", previous.tasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
       nextQuestions.forEach { states[it.sessionId] = TaskState(it.sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", previous.tasks[it.sessionId]?.since ?: System.currentTimeMillis()) }
-      previous.copy(version = version, protocol = client.detectedProtocol(), supportsSavedPermissions = client.supportsSavedPermissions(), connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
+      withSummary(previous.copy(version = version, protocol = client.detectedProtocol(), supportsSavedPermissions = client.supportsSavedPermissions(), connected = true, cached = previous.cached && previous.sessionId != null, loading = false,
         error = null, degraded = degraded.isNotEmpty(), staleDirectories = degraded,
         projects = projects, sessions = nextSessions, tasks = states,
         permissions = nextPermissions, questions = nextQuestions,
         projectId = (previous.projectId ?: store.selectedProject())?.takeIf { id -> projects.any { it.id == id } } ?: projects.firstOrNull()?.id,
-        sessionId = (previous.sessionId ?: store.selectedSession())?.takeIf { id -> nextSessions.any { it.id == id } })
+        sessionId = (previous.sessionId ?: store.selectedSession())?.takeIf { id -> nextSessions.any { it.id == id } }))
     }
     val current = mutable.value
     current.serverId?.let { cache.saveCatalog(it, current.projects, current.sessions) }
@@ -341,7 +368,12 @@ class MobileController private constructor(private val appContext: Context) {
           if (pendingPermission) "等待权限确认" else "等待你的回答", before?.since ?: System.currentTimeMillis())
         val next = after
         if (!(next.phase == TaskPhase.COMPLETED && pending)) {
-          mutable.update { it.copy(tasks = it.tasks + (sessionId to next)) }
+          val enteringTerminal = next.phase in TERMINAL_PHASES && before?.phase !in TERMINAL_PHASES
+          mutable.update { current ->
+            // A fresh completion/failure is unread again even if this session was viewed before.
+            val acknowledged = if (enteringTerminal) current.acknowledged - sessionId else current.acknowledged
+            withSummary(current.copy(tasks = current.tasks + (sessionId to next), acknowledged = acknowledged))
+          }
           val session = mutable.value.sessions.firstOrNull { it.id == sessionId }
           val profile = mutable.value.server
           if (session != null && profile?.notifications == true && next.phase != before?.phase) notifications.show(profile, session, next,
@@ -442,9 +474,11 @@ class MobileController private constructor(private val appContext: Context) {
     val project = mutable.value.projects.firstOrNull { it.directory == session.directory }
     val offline = mutable.value.cached && !mutable.value.connected
     val messages = emptyList<Message>()
-    mutable.update { it.copy(projectId = project?.id ?: it.projectId, sessionId = id, messages = messages,
+    // Opening a session reads its result: stop counting it as unread on the island immediately.
+    val acknowledged = mutable.value.acknowledged + id
+    mutable.update { withSummary(it.copy(projectId = project?.id ?: it.projectId, sessionId = id, messages = messages,
       todos = emptyList(), children = emptyList(), changes = emptyList(), files = emptyList(),
-      searchResults = emptyList(), fileText = null, fileBinary = false) }
+      searchResults = emptyList(), fileText = null, fileBinary = false, acknowledged = acknowledged)) }
     store.rememberLocation(project?.id, id)
     if (offline) {
       val serverId = state.value.serverId ?: return
@@ -529,14 +563,14 @@ class MobileController private constructor(private val appContext: Context) {
       if (command != null) op.client.command(session, command.name, text.substringAfter(' ', ""), op.snapshot.agent, op.snapshot.model)
       else op.client.send(session, text, op.snapshot.agent, op.snapshot.model)
       accepted?.invoke()
-      op.commitConnection { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送"))) }
+      op.commitConnection { withSummary(it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.THINKING, "任务已发送")))) }
     }
     if (op.connectionCurrent(this) && op.snapshot.server?.notifications == true) TaskMonitorService.start(appContext, op.serverId, session.id)
     if (op.isCurrent(this)) loadSession(session, token = op.token, client = op.client, ancillary = false)
   }
   fun abort() = withSession { op, client, session ->
     client.abort(session)
-    op.commitConnection { it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止"))) }
+    op.commitConnection { withSummary(it.copy(tasks = it.tasks + (session.id to TaskState(session.id, TaskPhase.ABORTED, "任务已停止")))) }
   }
   fun rename(title: String) = withSession { op, client, session -> client.renameSession(session, title); if (op.connectionCurrent(this)) reload() }
   fun deleteSession() = withSession { op, client, session ->

@@ -40,9 +40,12 @@ class TaskMonitorService : Service() {
     // A dedicated monitoring notification; kept separate from per-session results so stopping the
     // foreground state never cancels a real completion/failure notification, and so the foreground
     // placeholder is not left behind under a session-specific id.
-    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, notifications.buildMonitoring(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    else startForeground(FOREGROUND_ID, notifications.buildMonitoring())
     val controller = MobileController.get(this)
+    // A dedicated monitoring notification whose text mirrors the island summary; kept separate from
+    // per-session results so stopping the foreground state never cancels a real completion/failure
+    // notification, and so the foreground placeholder is not left behind under a session-specific id.
+    if (Build.VERSION.SDK_INT >= 29) startForeground(FOREGROUND_ID, notifications.buildMonitoring(controller.state.value.summary), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    else startForeground(FOREGROUND_ID, notifications.buildMonitoring(controller.state.value.summary))
     if (controller.state.value.serverId != serverId || !profile.notifications) {
       tracked.remove(serverId to sessionId)
       if (tracked.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }

@@ -467,19 +467,23 @@ class MainActivity : ComponentActivity() {
             }
 
             // 顶部实时运行状态灵动岛 (Live Task Island)
-            if (state.sessionId != null) {
-              val activeTask = state.tasks[state.sessionId]
+            if (!state.summary.isEmpty) {
               val stage = AppBackStack.backStage(inChatDetail, currentTab)
               val progress = backProgress.value
               val visualProgress = androidx.compose.animation.core.FastOutSlowInEasing.transform(progress)
               val showIsland = !inChatDetail || (stage == BackStage.DETAIL_TO_TAB && (gestureActive || progress > 0.01f))
 
               if (showIsland) {
+                val summaryTarget = state.summaryTargetId
                 LiquidTaskIsland(
-                  task = activeTask,
+                  summary = state.summary,
                   isDark = dark,
                   backdrop = contentBackdrop,
-                  onClick = { inChatDetail = true },
+                  onClick = {
+                    // 优先跳转到未读的已完成/失败会话；否则进入当前会话详情。
+                    summaryTarget?.let(controller::selectSession)
+                    inChatDetail = true
+                  },
                   modifier = Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
