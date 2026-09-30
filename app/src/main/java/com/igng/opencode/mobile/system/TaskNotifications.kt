@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
@@ -26,6 +27,9 @@ import org.json.JSONObject
 
 class TaskNotifications(private val context: Context) {
   private val manager = context.getSystemService(NotificationManager::class.java)
+  private val appIcon by lazy(LazyThreadSafetyMode.NONE) {
+    BitmapFactory.decodeResource(context.resources, R.drawable.ic_app)
+  }
   companion object {
     const val RUNNING = "task_running"
     const val ATTENTION = "task_attention"
@@ -74,7 +78,8 @@ class TaskNotifications(private val context: Context) {
     // instead of the fixed "等待权限确认" so the user can decide knowingly (A16).
     val body = permission?.let(::permissionSummary) ?: state.detail
     val builder = NotificationCompat.Builder(context, channel)
-      .setSmallIcon(R.drawable.ic_app).setContentTitle(title).setContentText(body.take(200))
+      .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
+      .setContentTitle(title).setContentText(body.take(200))
       .setStyle(NotificationCompat.BigTextStyle().bigText(body))
       .setContentIntent(open(profile.id, session.id)).setAutoCancel(!state.active)
       .setOnlyAlertOnce(running).setOngoing(running)
@@ -106,7 +111,8 @@ class TaskNotifications(private val context: Context) {
    *  from the per-session result notifications so removing the foreground state never removes a
    *  real task result. */
   fun buildMonitoring(): Notification = NotificationCompat.Builder(context, RUNNING)
-    .setSmallIcon(R.drawable.ic_app).setContentTitle("OpenCode 任务监控中").setContentText("仅跟踪当前服务器；切换后结束本地监控")
+    .setSmallIcon(R.drawable.ic_notification).setLargeIcon(appIcon)
+    .setContentTitle("OpenCode 任务监控中").setContentText("仅跟踪当前服务器；切换后结束本地监控")
     .setOngoing(true).setShowWhen(false).setCategory(NotificationCompat.CATEGORY_SERVICE)
     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
     .build()
