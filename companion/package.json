@@ -4,6 +4,6 @@
   "type": "module",
   "version": "0.1.0",
   "engines": {"node": ">=20"},
-  "scripts": {"start": "node src/server.mjs", "test": "node --test"},
+  "scripts": {"start": "node src/server.mjs", "test": "node --test --test-timeout=10000"},
   "dependencies": {"firebase-admin": "^13.0.0"}
 }
