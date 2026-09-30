@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import {createServer} from 'node:http'
 import {mkdtemp, mkdir, readFile, writeFile, rm} from 'node:fs/promises'
@@ -7,16 +7,37 @@ import {createCompanion, mapEvent, signPushPayload, signPushPayloadV1} from '../
 import {createEventForwarder, classifyTool, OpenCodeMobilePlugin} from '../opencode-mobile.plugin.js'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 async function until(f) { for (let i=0;i<300;i++) { if (await f()) return; await sleep(5) } throw Error('timed out') }
+// 临时目录统一在文件级 after 钩子里删除：重启类用例会故意让多个 companion 共用同一个状态文件，
+// 在用例结束时立刻 rm(dir) 会把还在写文件的实例的 ${registryFile}.tmp 一起删掉，
+// 造成 rename ENOENT；该错误从 after 钩子抛出后，HTTP 服务永远关不掉，监听 socket 让
+// node --test 子进程不退出，CI 的「验证 companion」步骤就此无限挂起，版本 tag 只剩 tag 没有 Release。
+const tempDirs = []
+after(async () => { for (const dir of tempDirs.splice(0)) await rm(dir, {recursive:true, force:true}) })
 async function fixture(t, send = async () => {}, extra = {}) {
   const dir = await mkdtemp('/tmp/opencode-companion-test-')
+  tempDirs.push(dir)
   const options = {pluginSecret:'inbound-fixture',pushSecret:'push-fixture',registryFile:dir+'/state.json',verifyDevice:async a=>a==='Basic fixture',send,fetchSession:async()=>({title:'Task'}),retryDelayMs:10,...extra}
   const app = createCompanion(options);await app.load()
   const server=createServer(app.handle).listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r))
-  const post = (path, data, auth='Basic fixture')=>fetch(`http://127.0.0.1:${server.address().port}${path}`, {method:'POST',headers:{authorization:auth,'x-opencode-mobile-secret':'inbound-fixture'},body:JSON.stringify(data)})
+  // 响应体必须读完再返回：undici 的 keep-alive 连接要等 body 被消费才归还，
+  // 否则 server.close() 的回调不会触发，监听 socket 一直占着事件循环。
+  const post = async (path, data, auth='Basic fixture') => {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}${path}`, {method:'POST',headers:{authorization:auth,'x-opencode-mobile-secret':'inbound-fixture'},body:JSON.stringify(data)})
+    const text = await res.text()
+    return new Response(text, {status:res.status, statusText:res.statusText, headers:res.headers})
+  }
   const register = (id='device')=>post('/v1/devices',{deviceId:id,serverKey:'srv',profileId:'profile',token:'token-'+id})
   const event=(type,props={})=>post('/v1/events',{type,serverKey:'srv',sessionId:'ses',directory:'/repo',...props})
-  const close=async()=>{await app.close();await new Promise(r=>server.close(r))}
-  t.after(async()=>{await close();await rm(dir,{recursive:true,force:true})})
+  // 关服顺序：先等落盘事务收尾，再强制断开残留连接并关闭监听。
+  // finally 保证 app.close() 出错时监听 socket 一定被释放，测试进程不会因为一个失败用例卡住不退出；
+  // 重复 close 容忍 ERR_SERVER_NOT_RUNNING，因为部分用例在测试体内已显式关闭过一次。
+  const close=async()=>{
+    try { await app.close() } finally {
+      server.closeAllConnections?.()
+      await new Promise((resolve,reject)=>server.close(err=>{ if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') reject(err); else resolve() }))
+    }
+  }
+  t.after(close)
   return {dir,options,app,post,register,event,close}
 }
 test('shared task contract and raw tool categories remain equivalent',()=>{
@@ -119,6 +140,8 @@ test('plugin spool retries HTTP failure and preserves identity across restart',a
 })
 test('real plugin projection keeps private command/output out of the durable spool',async t=>{
  const dir=await mkdtemp('/tmp/opencode-plugin-projection-'), old={...process.env},oldFetch=globalThis.fetch,bodies=[]
+ // 插件的转发器在用例结束时仍在后台重试，队列目录交给文件级 after 钩子统一删除，避免删掉还在写的队列文件。
+ tempDirs.push(dir)
  Object.assign(process.env,{OPENCODE_MOBILE_PLUGIN_QUEUE_DIR:dir,OPENCODE_MOBILE_COMPANION_URL:'http://127.0.0.1',OPENCODE_MOBILE_PLUGIN_SECRET:'fixture',OPENCODE_MOBILE_SERVER_KEY:'srv'})
  globalThis.fetch=async(_u,o)=>{bodies.push(JSON.parse(o.body));return {status:202}}
  try {
@@ -126,5 +149,5 @@ test('real plugin projection keeps private command/output out of the durable spo
   await plugin.event({event:{type:'message.part.updated',properties:{sessionID:'s',part:{type:'tool',name:'bash',state:{input:{command:'gradle test PRIVATE'},output:'PRIVATE'}}}}})
   await until(()=>bodies.length===1);assert.equal(bodies[0].toolKind,'TESTING');assert.equal(JSON.stringify(bodies).includes('PRIVATE'),false)
   await sleep(30)
- }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_MOBILE_PLUGIN_QUEUE_DIR','OPENCODE_MOBILE_COMPANION_URL','OPENCODE_MOBILE_PLUGIN_SECRET','OPENCODE_MOBILE_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}await rm(dir,{recursive:true})}
+ }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_MOBILE_PLUGIN_QUEUE_DIR','OPENCODE_MOBILE_COMPANION_URL','OPENCODE_MOBILE_PLUGIN_SECRET','OPENCODE_MOBILE_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}}
 })

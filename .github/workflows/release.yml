@@ -22,10 +22,19 @@ on:
 permissions:
   contents: write
 
+# 同一个 tag 只允许一条发布流水线；不同 tag 之间互不阻塞。
+# cancel-in-progress 必须是 false：正在发布的版本不能被后来的 push 打断，否则只剩 tag 没有 Release。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: 构建并发布
     runs-on: ubuntu-latest
+    # 兜底：任何一步卡住（历史上 npm test 会无限挂起）都在 30 分钟内以失败结束，
+    # 而不是占着 runner 挂几个小时，让「tag 已推送但 Release 缺失」变成无人察觉的静默故障。
+    timeout-minutes: 30
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       RELEASE_TYPE: ${{ inputs.release_type || 'pre-release' }}
@@ -81,6 +90,7 @@ jobs:
           fi
 
       - name: 构建并验证 Android
+        timeout-minutes: 25
         env:
           OPENCODE_MOBILE_KEYSTORE_PASSWORD: ${{ secrets.OPENCODE_MOBILE_KEYSTORE_PASSWORD }}
           OPENCODE_MOBILE_KEY_ALIAS: ${{ secrets.OPENCODE_MOBILE_KEY_ALIAS }}
@@ -95,6 +105,7 @@ jobs:
           ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleRelease
 
       - name: 验证 companion
+        timeout-minutes: 10
         working-directory: companion
         run: |
           npm ci
@@ -210,17 +221,44 @@ jobs:
           } > release-notes.md
 
       - name: 发布 GitHub Release
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           apk_asset="${{ steps.artifact.outputs.path }}"
-          args=("$RELEASE_TAG" "$apk_asset" --title "OpenCode Mobile ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag)
+          apk_name="${{ steps.asset.outputs.name }}"
+          flags=()
           if [[ "$RELEASE_TYPE" == "pre-release" ]]; then
-            args+=(--prerelease)
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
           fi
-          gh release create "${args[@]}"
+          # 发布必须可重入：上一次运行在「已推 tag」之后失败或超时（例如 v0.1.0-rc.9 卡在 companion 测试），
+          # tag 就停在「只有 tag、Release 页面找不到」的状态。重跑同一 tag 时改为更新既有 Release 并覆盖产物，
+          # 而不是让 gh release create 因 Release 已存在而报错退出。
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG 已存在，按幂等更新处理"
+            gh release edit "$RELEASE_TAG" --title "OpenCode Mobile ${RELEASE_TAG}" --notes-file release-notes.md "${flags[@]}"
+            gh release upload "$RELEASE_TAG" "$apk_asset" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$apk_asset" --title "OpenCode Mobile ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag "${flags[@]}"
+          fi
+          # 显式核对发布结果，缺失时以失败结束，不要出现「工作流成功但 Release 页面没有版本」。
+          gh release view "$RELEASE_TAG" --json tagName,prerelease,draft,url,assets \
+            --jq '"已发布 \(.tagName)（prerelease=\(.prerelease)，draft=\(.draft)）：\(.url)，产物：\([.assets[].name] | join(", "))"'
+          if ! gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -qx -- "$apk_name"; then
+            echo "Release 上缺少 APK 产物：$apk_name" >&2
+            exit 1
+          fi
+
+      - name: 发布结果提示
+        if: failure()
+        shell: bash
+        run: |
+          echo "版本 tag ${RELEASE_TAG} 可能只有 tag、没有 GitHub Release。" >&2
+          echo "请到 Actions 里对本仓库重新手动运行本工作流并填写 tag=${RELEASE_TAG}（发布步骤已幂等，可安全重跑）。" >&2
 
       - name: 清理 runner 签名材料
         if: always()
