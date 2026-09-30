@@ -885,6 +885,7 @@ private fun MiuixServerForm(
           value = password,
           onValueChange = { text: String -> password = text },
           label = if (existing == null) "访问密码" else "新密码（留空保持不变）",
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
           visualTransformation = PasswordVisualTransformation(),
           modifier = Modifier.fillMaxWidth()
         )
@@ -914,6 +915,7 @@ private fun MiuixServerForm(
           value = pluginSecret,
           onValueChange = { text: String -> pluginSecret = text },
           label = "推送验证密钥 (OPENCODE_MOBILE_PUSH_SECRET)",
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
           visualTransformation = PasswordVisualTransformation(),
           modifier = Modifier.fillMaxWidth()
         )
