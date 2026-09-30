@@ -13,6 +13,8 @@ jobs:
   verify:
     name: 构建与测试
     runs-on: ubuntu-latest
+    # companion 测试历史上会无限挂起；没有超时限制时，PR 与发布流水线都会静默卡住。
+    timeout-minutes: 30
     steps:
       - name: 检出
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -31,9 +33,11 @@ jobs:
           cache-dependency-path: companion/package-lock.json
 
       - name: Android 单元测试与 Debug 构建
+        timeout-minutes: 25
         run: ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleDebug
 
       - name: companion 测试
+        timeout-minutes: 10
         working-directory: companion
         run: |
           npm ci
