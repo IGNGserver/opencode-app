@@ -37,6 +37,8 @@ import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 class MainActivity : ComponentActivity() {
   private var deepLink by mutableStateOf<Pair<String, String>?>(null)
@@ -59,6 +61,7 @@ class MainActivity : ComponentActivity() {
       var inChatDetail by rememberSaveable { mutableStateOf(false) }
       var showingServersSheet by remember { mutableStateOf(false) }
       var globalMessage by remember { mutableStateOf<String?>(null) }
+      var globalMessageType by remember { mutableStateOf(LiquidToastType.INFO) }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
       // 屏幕自适应：平板/宽屏使用 NavigationRail，手机使用悬浮 Liquid Glass 底栏
@@ -72,11 +75,13 @@ class MainActivity : ComponentActivity() {
       LaunchedEffect(state.error) {
         val error = state.error ?: return@LaunchedEffect
         globalMessage = error
+        globalMessageType = LiquidToastType.ERROR
         controller.clearError()
       }
       LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         globalMessage = message
+        globalMessageType = LiquidToastType.SUCCESS
         controller.clearMessage()
       }
       LaunchedEffect(state.serverId) {
@@ -135,11 +140,13 @@ class MainActivity : ComponentActivity() {
 
         val homeScrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
         val navIcons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)
+        val contentBackdrop = rememberLayerBackdrop()
 
-        // 顶层采用 MIUIX 官方 Scaffold 脚手架
-        Scaffold(
-          modifier = Modifier.imePadding(),
-          topBar = {
+        CompositionLocalProvider(LocalBackdrop provides contentBackdrop) {
+          // 顶层采用 MIUIX 官方 Scaffold 脚手架
+          Scaffold(
+            modifier = Modifier.imePadding(),
+            topBar = {
             if (!inChatDetail) {
               when (currentTab) {
                 RootTab.HOME -> {
@@ -152,6 +159,7 @@ class MainActivity : ComponentActivity() {
                       LiquidGlassSurface(
                         modifier = Modifier.padding(start = 12.dp),
                         cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
+                        isDark = dark,
                         onClick = { showingServersSheet = true }
                       ) {
                         Row(
@@ -202,198 +210,174 @@ class MainActivity : ComponentActivity() {
               }
             }
           },
-          bottomBar = {
-            // 移动端/窄屏：悬浮 Liquid Glass 导航 Dock
-            if (!isWideScreen && !inChatDetail && state.profiles.isNotEmpty() && !keyboardOpen) {
-              Box(
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .navigationBarsPadding()
-                  .padding(bottom = 12.dp),
-                contentAlignment = Alignment.Center
-              ) {
-                LiquidGlassSurface(
-                  cornerRadius = LiquidGlassTokens.PillCornerRadius
-                ) {
-                  Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                  ) {
-                    RootTab.entries.forEachIndexed { index, item ->
-                      val isSelected = currentTab == item
-                      val tint = if (isSelected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
-                      Row(
-                        modifier = Modifier
-                          .clip(miuixSquircleShape(16.dp))
-                          .clickable { currentTab = item }
-                          .background(if (isSelected) MiuixColorTokens.PrimarySubtle else Color.Transparent)
-                          .padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                      ) {
-                        Icon(
-                          imageVector = navIcons[index],
-                          contentDescription = item.label,
-                          tint = tint,
-                          modifier = Modifier.size(22.dp)
-                        )
-                        if (isSelected) {
-                          Text(
-                            text = item.label,
-                            style = MiuixTheme.textStyles.footnote1.copy(
-                              color = MiuixTheme.colorScheme.primary,
-                              fontWeight = FontWeight.SemiBold
-                            )
-                          )
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
+          bottomBar = {}
         ) { insets ->
-          Row(Modifier.fillMaxSize().padding(insets)) {
-            // 宽屏模式：左侧 NavigationRail
-            if (isWideScreen && !inChatDetail && state.profiles.isNotEmpty()) {
-              NavigationRail {
-                RootTab.entries.forEachIndexed { index, item ->
-                  NavigationRailItem(
-                    selected = currentTab == item,
-                    onClick = { currentTab = item },
-                    icon = navIcons[index],
-                    label = item.label
-                  )
-                }
-              }
-            }
-
-            // 主视图内容容器：基层常驻 + 详情层随返回手势滑动，才能实时预览上一级。
-            Box(Modifier.weight(1f).fillMaxHeight()) {
-              val progress = backProgress.value
-
-              // 基层：当前标签页内容。
-              Box(
-                Modifier
-                  .fillMaxSize()
-                  .graphicsLayer {
-                    // 详情层回退时基层轻微放大，形成 MIUIX 层次纵深。
-                    if (inChatDetail) {
-                      val scale = 1f - progress * 0.08f
-                      scaleX = scale
-                      scaleY = scale
-                    }
+          Box(Modifier.fillMaxSize()) {
+            Row(
+              Modifier
+                .fillMaxSize()
+                .padding(top = insets.calculateTopPadding())
+                .layerBackdrop(contentBackdrop)
+            ) {
+              // 宽屏模式：左侧 NavigationRail
+              if (isWideScreen && !inChatDetail && state.profiles.isNotEmpty()) {
+                NavigationRail {
+                  RootTab.entries.forEachIndexed { index, item ->
+                    NavigationRailItem(
+                      selected = currentTab == item,
+                      onClick = { currentTab = item },
+                      icon = navIcons[index],
+                      label = item.label
+                    )
                   }
-              ) {
-                when (currentTab) {
-                  RootTab.HOME -> HomeScreen(
-                    state = state,
-                    controller = controller,
-                    onOpen = { sessionId ->
-                      controller.selectSession(sessionId)
-                      inChatDetail = true
-                    },
-                    onServers = { showingServersSheet = true },
-                    onSessions = { currentTab = RootTab.SESSIONS },
-                    scrollBehavior = homeScrollBehavior
-                  )
-                  RootTab.SESSIONS -> SessionsScreen(
-                    state = state,
-                    controller = controller,
-                    onOpen = { sessionId ->
-                      controller.selectSession(sessionId)
-                      inChatDetail = true
-                    }
-                  )
-                  RootTab.SETTINGS -> SettingsScreen(
-                    state = state,
-                    controller = controller,
-                    dark = dark,
-                    onDark = {
-                      dark = it
-                      preferences.edit().putBoolean("dark", it).apply()
-                    },
-                    onNotifications = {
-                      if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    },
-                    onManageServers = { showingServersSheet = true }
-                  )
                 }
               }
 
-              // 详情层：对话详情覆盖在基层之上，随返回手势进度右移露出上一级。
-              if (inChatDetail || gestureActive || progress > 0.01f) {
+              // 主视图内容容器：基层常驻 + 详情层随返回手势滑动，才能实时预览上一级。
+              Box(Modifier.weight(1f).fillMaxHeight()) {
+                val progress = backProgress.value
+
+                // 基层：当前标签页内容。
                 Box(
                   Modifier
                     .fillMaxSize()
-                    .background(MiuixTheme.colorScheme.surface)
                     .graphicsLayer {
-                      translationX = progress * size.width
-                      alpha = 1f - progress * 0.15f
+                      // 详情层回退时基层轻微放大，形成 MIUIX 层次纵深。
+                      if (inChatDetail) {
+                        val scale = 1f - progress * 0.08f
+                        scaleX = scale
+                        scaleY = scale
+                      }
                     }
                 ) {
-                  ChatScreen(
-                    state = state,
-                    controller = controller,
-                    drafts = drafts,
-                    onBack = { inChatDetail = false }
+                  when (currentTab) {
+                    RootTab.HOME -> HomeScreen(
+                      state = state,
+                      controller = controller,
+                      onOpen = { sessionId ->
+                        controller.selectSession(sessionId)
+                        inChatDetail = true
+                      },
+                      onServers = { showingServersSheet = true },
+                      onSessions = { currentTab = RootTab.SESSIONS },
+                      scrollBehavior = homeScrollBehavior
+                    )
+                    RootTab.SESSIONS -> SessionsScreen(
+                      state = state,
+                      controller = controller,
+                      onOpen = { sessionId ->
+                        controller.selectSession(sessionId)
+                        inChatDetail = true
+                      }
+                    )
+                    RootTab.SETTINGS -> SettingsScreen(
+                      state = state,
+                      controller = controller,
+                      dark = dark,
+                      onDark = {
+                        dark = it
+                        preferences.edit().putBoolean("dark", it).apply()
+                      },
+                      onNotifications = {
+                        if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                      },
+                      onManageServers = { showingServersSheet = true }
+                    )
+                  }
+                }
+
+                // 详情层：对话详情覆盖在基层之上，随返回手势进度右移露出上一级。
+                if (inChatDetail || gestureActive || progress > 0.01f) {
+                  Box(
+                    Modifier
+                      .fillMaxSize()
+                      .background(MiuixTheme.colorScheme.surface)
+                      .graphicsLayer {
+                        translationX = progress * size.width
+                        alpha = 1f - progress * 0.15f
+                      }
+                  ) {
+                    ChatScreen(
+                      state = state,
+                      controller = controller,
+                      drafts = drafts,
+                      onBack = { inChatDetail = false }
+                    )
+                  }
+                }
+
+                // 全局加载指示器 (MIUIX 风格)
+                if (state.loading) {
+                  InfiniteProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).height(3.dp)
                   )
                 }
               }
+            }
 
-              // 全局加载指示器 (MIUIX 风格)
-              if (state.loading) {
-                InfiniteProgressIndicator(
-                  modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).height(3.dp)
+            // 移动端/窄屏：悬浮在整个滚动视图之上的光学 Liquid Glass 导航 Dock
+            if (!isWideScreen && !inChatDetail && state.profiles.isNotEmpty() && !keyboardOpen) {
+              Box(
+                modifier = Modifier
+                  .align(Alignment.BottomCenter)
+                  .navigationBarsPadding()
+                  .padding(bottom = 12.dp)
+              ) {
+                LiquidGlassDock(
+                  selectedTab = currentTab,
+                  onTabSelected = { currentTab = it },
+                  isDark = dark,
+                  backdrop = contentBackdrop
                 )
               }
             }
-          }
 
-          // 全局消息提示弹窗 (MIUIX SuperDialog)。
-          // 必须声明在 Scaffold 的内容作用域内：MIUIX 弹层由 Scaffold provide 的
-          // LocalDialogStates / LocalRootDialogStates 驱动，且只由 Scaffold 自带的
-          // MiuixPopupHost 渲染。声明在 Scaffold 之外会落进无人渲染的默认空列表，
-          // 导致“添加服务器”等弹层点击后没有任何反应。
-          val msg = globalMessage
-          if (msg != null) {
-            SuperDialog(
-              title = "提示",
-              show = true,
-              onDismissRequest = { globalMessage = null }
-            ) {
-              Column(Modifier.padding(top = 8.dp)) {
-                Text(msg, style = MiuixTheme.textStyles.body1)
-                Spacer(Modifier.height(14.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                  TextButton(
-                    text = "确定",
-                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                    onClick = { globalMessage = null }
-                  )
-                }
-              }
+            // 顶部实时运行状态灵动岛 (Live Task Island)
+            if (!inChatDetail && state.sessionId != null) {
+              val activeTask = state.tasks[state.sessionId]
+              LiquidTaskIsland(
+                task = activeTask,
+                isDark = dark,
+                backdrop = contentBackdrop,
+                onClick = { inChatDetail = true },
+                modifier = Modifier
+                  .align(Alignment.TopCenter)
+                  .statusBarsPadding()
+                  .padding(top = 56.dp)
+              )
             }
-          }
 
-          // 服务器管理 BottomSheet（同样必须在 Scaffold 内容作用域内）。
-          if (showingServersSheet) {
-            ServersModal(
-              state = state,
-              controller = controller,
-              onDismiss = { showingServersSheet = false },
-              onConnected = {
-                showingServersSheet = false
-                currentTab = RootTab.HOME
-              }
+            // 全局液态玻璃悬浮轻提示 (Liquid Toast)
+            LiquidToastHost(
+              message = globalMessage,
+              type = globalMessageType,
+              isDark = dark,
+              backdrop = contentBackdrop,
+              onDismiss = { globalMessage = null },
+              modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 16.dp)
             )
           }
+        }
+
+        // 服务器管理 BottomSheet（必须在 Scaffold 内容作用域内）。
+        if (showingServersSheet) {
+          ServersModal(
+            state = state,
+            controller = controller,
+            onDismiss = { showingServersSheet = false },
+            onConnected = {
+              showingServersSheet = false
+              currentTab = RootTab.HOME
+            }
+          )
         }
       }
     }
   }
+}
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
