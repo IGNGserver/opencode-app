@@ -32,8 +32,36 @@ internal interface IslandAdapter {
   fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean)
 }
 
+/**
+ * 需要厂商授权 / 合作的灵动岛通道开关。默认全部关闭；获得厂商权限后只需在此打开并填入配对参数，
+ * 无需改动通知构建逻辑。关闭时对应适配器完全不产生副作用。
+ */
+internal object IslandVendorConfig {
+  /** 荣耀灵动胶囊：需荣耀开发者企业认证与白名单，非运行时通知 extras 通道。 */
+  var honorCapsuleEnabled = false
+  /** OPPO ColorOS 15 流体云（意图共享）：需开放平台分配 serviceId。 */
+  var oppoFluidCloudEnabled = false
+  /** OPPO 流体云卡片 ID，申请后填入。 */
+  var oppoFluidCloudServiceId = ""
+  /** OPPO 流体云传输实现；默认空实现，接入厂商 SDK / ContentProviderClient 后注入。 */
+  var oppoFluidCloudTransport: OppoFluidCloudTransport = NoopOppoFluidCloudTransport
+}
+
+/** 把构建好的流体云意图交给 OPPO 通道。默认空实现，便于在不依赖厂商环境时构建与测试。 */
+internal interface OppoFluidCloudTransport {
+  fun publish(context: Context, serviceId: String, payload: String)
+}
+
+internal object NoopOppoFluidCloudTransport : OppoFluidCloudTransport {
+  override fun publish(context: Context, serviceId: String, payload: String) = Unit
+}
+
+internal fun brandKey(): String = (Build.BRAND + " " + Build.MANUFACTURER).lowercase()
+
 internal object IslandRegistry {
-  private val adapters: List<IslandAdapter> = listOf(XiaomiIslandAdapter, VivoIslandAdapter, StandardLiveUpdateAdapter)
+  private val adapters: List<IslandAdapter> = listOf(
+    XiaomiIslandAdapter, VivoIslandAdapter, HonorIslandAdapter, OppoFluidCloudAdapter, StandardLiveUpdateAdapter
+  )
 
   fun extendAll(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
     adapters.forEach { runCatching { it.extend(context, notification, title, detail, running) } }
@@ -111,7 +139,7 @@ internal object VivoIslandAdapter : IslandAdapter {
   override val vendor = "vivo"
 
   private fun isVivo(): Boolean {
-    val brand = (Build.BRAND + " " + Build.MANUFACTURER).lowercase()
+    val brand = brandKey()
     return "vivo" in brand || "iqoo" in brand
   }
 
@@ -142,6 +170,75 @@ internal object VivoIslandAdapter : IslandAdapter {
     }
     extras.putBundle("notification.superx.baseInfos", baseInfo)
     notification.extras.putAll(extras)
+  }
+}
+
+/**
+ * 荣耀 MagicOS 灵动胶囊 / YOYO 建议。属于白名单制的“快捷服务 / 卡片模板”通道，非通行运行时通知
+ * extras，需荣耀开发者企业认证与专项对接，因此默认关闭。开启后本适配器标记“已就绪”，
+ * 实际下发由荣耀对接层完成（待厂商提供具体协议）。
+ */
+internal object HonorIslandAdapter : IslandAdapter {
+  override val vendor = "honor"
+
+  private fun isHonor(): Boolean = "honor" in brandKey()
+
+  override fun support(context: Context): IslandSupport = IslandSupport(
+    vendor = vendor,
+    label = "荣耀灵动胶囊（YOYO 建议）",
+    supported = isHonor() && IslandVendorConfig.honorCapsuleEnabled,
+    granted = false,
+    note = when {
+      !isHonor() -> "当前设备不是荣耀。"
+      !IslandVendorConfig.honorCapsuleEnabled -> "该通道需荣耀开发者企业认证与白名单，当前未开启。"
+      else -> "通道已开启；灵动胶囊的呈现由荣耀审核与 YOYO 建议服务控制。"
+    }
+  )
+
+  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
+    if (!isHonor() || !IslandVendorConfig.honorCapsuleEnabled) return
+    // 荣耀通道走独立对接（非通知 extras），此处按约定不写入 notification.extras，避免影响标准提示。
+  }
+}
+
+/**
+ * OPPO ColorOS 15 流体云（意图共享）。端侧通过「意图共享」创建 / 更新 / 结束，`actionStatus = 0/1/2`；
+ * 需开放平台分配 `serviceId`。为不依赖厂商环境即可构建测试，实际下发通过
+ * [IslandVendorConfig.oppoFluidCloudTransport] 注入；默认空实现。ColorOS 16 无需此通道，走标准 Live Updates。
+ */
+internal object OppoFluidCloudAdapter : IslandAdapter {
+  override val vendor = "oppo"
+
+  private fun isOppo(): Boolean = run {
+    val brand = brandKey()
+    "oppo" in brand || "oneplus" in brand || "realme" in brand
+  }
+
+  private fun enabled(): Boolean = IslandVendorConfig.oppoFluidCloudEnabled && IslandVendorConfig.oppoFluidCloudServiceId.isNotBlank()
+
+  override fun support(context: Context): IslandSupport = IslandSupport(
+    vendor = vendor,
+    label = "OPPO 流体云（ColorOS 15 意图共享）",
+    supported = isOppo() && enabled(),
+    granted = enabled(),
+    note = when {
+      !isOppo() -> "当前设备不是 OPPO / 一加 / realme。"
+      !enabled() -> "该通道需 OPPO 开放平台分配 serviceId，当前未开启；ColorOS 16 走标准实时更新即可。"
+      else -> "通道已开启；请确认真机系统为 ColorOS 15 且意图共享特性开关已打开。"
+    }
+  )
+
+  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
+    if (!isOppo() || !enabled()) return
+    val payload = JSONObject()
+      .put("intentName", "OpenCode.TaskSummary")
+      .put("actionStatus", if (running) 1 else 0) // 0=创建，1=更新；结束由取消通知触发
+      .put("entityName", "TASK")
+      .put("entityId", "opencode-task-summary")
+      .put("capsule", JSONObject().put("rightText", detail.take(20)))
+      .put("primary", JSONObject().put("title", title.take(40)).put("content", detail.take(100)))
+      .toString()
+    runCatching { IslandVendorConfig.oppoFluidCloudTransport.publish(context, IslandVendorConfig.oppoFluidCloudServiceId, payload) }
   }
 }
 
