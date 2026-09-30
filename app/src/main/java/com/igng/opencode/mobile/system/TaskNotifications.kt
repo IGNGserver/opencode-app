@@ -9,10 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
-import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -24,7 +22,6 @@ import com.igng.opencode.mobile.core.TaskPhase
 import com.igng.opencode.mobile.core.TaskState
 import com.igng.opencode.mobile.core.TaskSummary
 import com.igng.opencode.mobile.ui.MainActivity
-import org.json.JSONObject
 
 class TaskNotifications(private val context: Context) {
   private val manager = context.getSystemService(NotificationManager::class.java)
@@ -103,7 +100,7 @@ class TaskNotifications(private val context: Context) {
       builder.addAction(0, "回答", open(profile.id, session.id))
     }
     val notification = builder.build()
-    XiaomiIslandAdapter(context).extend(notification, title, body, running)
+    IslandRegistry.extendAll(context, notification, title, body, running)
     return notification
   }
   private fun permissionSummary(permission: PermissionRequest): String = buildString {
@@ -157,7 +154,7 @@ class TaskNotifications(private val context: Context) {
       .setShortCriticalText(summary.shortText)
     targetSessionId?.let { builder.setContentIntent(open(profile.id, it)) }
     val notification = builder.build()
-    XiaomiIslandAdapter(context).extend(notification, "OpenCode 任务总览", text, running = summary.running > 0)
+    IslandRegistry.extendAll(context, notification, "OpenCode 任务总览", text, running = summary.running > 0)
     return notification
   }
 
@@ -169,26 +166,14 @@ class TaskNotifications(private val context: Context) {
     manager.notify(summaryId(profile.id), buildSummary(profile, summary, targetSessionId))
   }
   fun cancelSummary(serverId: String) = manager.cancel(summaryId(serverId))
-}
 
-internal class XiaomiIslandAdapter(private val context: Context) {
-  fun extend(notification: Notification, title: String, detail: String, running: Boolean) {
-    val version = runCatching { Settings.System.getInt(context.contentResolver, "notification_focus_protocol", 0) }.getOrDefault(0)
-    if (version < 3) return
-    val iconKey = "miui.focus.pic_app"
-    val pics = Bundle().apply { putParcelable(iconKey, Icon.createWithResource(context, R.drawable.ic_app)) }
-    val parameters = JSONObject().put("param_v2", JSONObject()
-      .put("protocol", 1).put("business", "app").put("updatable", running)
-      .put("ticker", detail.take(32)).put("aodTitle", title.take(32))
-      .put("param_island", JSONObject()
-        .put("islandProperty", 1)
-        .put("smallIslandArea", JSONObject().put("picInfo", JSONObject().put("type", 1).put("pic", iconKey)))
-        .put("bigIslandArea", JSONObject()
-          .put("imageTextInfoLeft", JSONObject().put("type", 1)
-            .put("picInfo", JSONObject().put("type", 1).put("pic", iconKey))
-            .put("miui.focus.paramtextInfo", JSONObject().put("frontTitle", "OpenCode")
-              .put("title", title.take(24)).put("content", detail.take(32)))))))
-    notification.extras.putBundle("miui.focus.pics", pics)
-    notification.extras.putString("miui.focus.param", parameters.toString())
+  /** 打开系统「实时更新 / 提升为常驻通知」授权页（Android 16+）。 */
+  fun promotedNotificationSettingsIntent(): Intent? {
+    if (Build.VERSION.SDK_INT < 36) return null
+    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS)
+      .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    return if (intent.resolveActivity(context.packageManager) != null) intent else null
   }
 }
+

@@ -11,7 +11,7 @@
 - `core/PairLink.kt`: 官方 `opencode pair` 链接解析（强制 HTTPS）。
 - `core/Http.kt` / `core/Diagnostics.kt`: 进程级 OkHttp 连接池/调度器；轻量日志。
 - `ui/`: 小米 HyperOS / MIUIX 风格页面、Liquid Glass 悬浮质感与不同消息 Part 的渲染；`MainActivity` 负责根导航与深链。
-- `system/`: 通知 Channel、Android Live Updates 请求、小米岛参数、任务前台服务与通知操作。全服务器任务总览沿用统一口径（`core/TaskSummary.kt`）：`TaskNotifications.buildSummary` 生成单条 ongoing 的 Live Update 通知（`setRequestPromotedOngoing` + `setShortCriticalText`），并由 `MobileController` 在状态变化时统一发布。
+- `system/`: 通知 Channel、Android Live Updates 请求、厂商灵动岛参数、任务前台服务与通知操作。全服务器任务总览沿用统一口径（`core/TaskSummary.kt`）：`TaskNotifications.buildSummary` 生成单条 ongoing 的 Live Update 通知（`setRequestPromotedOngoing` + `setShortCriticalText`），并由 `MobileController` 在状态变化时统一发布；`system/IslandAdapters.kt` 按「能力探测 + 品牌兜底」把同一通知分发给小米超级岛、vivo 原子岛与标准实时更新通道（品牌矩阵见 `docs/ISLAND_ADAPTATION.md`）。
 - `push/`: 可选 FCM 客户端、设备注册/注销，以及推送消息 HMAC 校验（仅 v3，逐字段长度前缀 + 新鲜度 + 设备绑定 + 持久序号）；加密注销队列在 App 存活/启动时重试。
 - `companion/`: OpenCode 插件与只传递任务元数据的 FCM 伴随服务；插件先持久化有序事件，companion 原子提交设备/任务状态/去重/待投递队列；同会话最新待发状态覆盖旧状态，单文件单进程写入。
 - `docs/task-event-contract.json`: Android `TaskReducer` 与 companion `mapEvent` 共同遵守的任务阶段契约（两侧各有测试断言）。
@@ -24,5 +24,6 @@
 4. 检查 Todo、子会话、Diff、文件浏览；测试新建、继续、Fork、删除等会话操作。
 5. 在 Android 16 设备检查 Live Updates；在已获焦点通知权限的小米 HyperOS 3 设备检查超级岛。
 6. 配置 Firebase 和伴随服务后强制结束 App 进程，触发任务完成与待处理事件，检查 FCM 数据消息通知与 Deep Link。
+7. 分品牌核对灵动岛适配状态（可直接查看设置页「灵动岛适配」分区），逐项回填 `docs/ISLAND_ADAPTATION.md`。
 
 源 API 文档：https://opencode.ai/docs/server/ 。服务端版本可能变化；接入目标实例时应核对该实例 `/doc` 暴露的 OpenAPI 规范。
