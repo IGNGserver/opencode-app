@@ -39,8 +39,7 @@ internal fun memoryPreferences(): SharedPreferences {
 class BoundaryRegressionTest {
   private fun store(p:SharedPreferences=memoryPreferences(),secret:SharedPreferences=memoryPreferences())=ServerStore(p,secret,{"encrypted:$it"},{require(it.startsWith("encrypted:"));it.removePrefix("encrypted:")})
   private fun profile(url:String)=ServerProfile("srv","Server",url,allowCleartext=true)
-  @Test fun originChangeCannotRetainSavedCookieInTheRealConnection()=runBlocking {
-    MockWebServer().use { a -> MockWebServer().use { b ->
+  @Test fun originChangeCannotRetainSavedCookieInTheRealConnection()=runBlocking {    MockWebServer().use { a -> MockWebServer().use { b ->
       val store=store();val old=profile(a.url("/").toString());store.save(old,"old-password","private-cookie","opencode")
       val edited=old.copy(url=b.url("/").toString())
       val tested=profileCredentials(old.url,edited.url,store.credentials(old.id),"opencode","new-password")
@@ -146,6 +145,24 @@ class BoundaryRegressionTest {
     val answer=formAnswer(form,listOf(listOf("fast"),listOf("2"),emptyList()))
     assertEquals(2,answer.getInt("count"));assertFalse(answer.has("hidden"))
     assertTrue(runCatching{formAnswer(form,listOf(listOf("fast"),listOf("2.5"),emptyList()))}.isFailure)
+  }
+  @Test fun islandVendorSwitchesPersistWithoutTouchingCredentials() {
+    val p=memoryPreferences();val sec=memoryPreferences();val store=store(p,sec)
+    val original=ServerProfile("srv","Server","https://x",username="opencode")
+    store.save(original,"secret-password",credentialUsername="opencode")
+    store.updateIslandVendor(original.copy(islandHonor=true,islandOppoFluidCloud=true))
+    val reloaded=store.profiles().single()
+    assertTrue(reloaded.islandHonor);assertTrue(reloaded.islandOppoFluidCloud)
+    assertEquals("secret-password",store.credentials("srv").password)
+    assertEquals("https://x",reloaded.url)
+    // Values survive a full round-trip through the persisted JSON read by a fresh store instance.
+    val fresh=ServerStore(p,sec,{"encrypted:$it"},{require(it.startsWith("encrypted:"));it.removePrefix("encrypted:")})
+    assertTrue(fresh.profiles().single().islandHonor)
+  }
+  @Test fun islandVendorSwitchesDefaultOffAndRoundTrip() {
+    val store=store();store.save(profile("https://x"),"p",credentialUsername="opencode")
+    val p=store.profiles().single()
+    assertFalse(p.islandHonor);assertFalse(p.islandOppoFluidCloud)
   }
   @Test fun repeatedCursorFailsInsteadOfReturningPartialAuthoritativeData()=runBlocking {
     MockWebServer().use { s ->

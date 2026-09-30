@@ -22,8 +22,10 @@
 
 - `system/IslandAdapters.kt`：定义 `IslandAdapter` 接口与 `IslandRegistry`。约定按「能力探测 + 品牌兜底」路由，
   不支持时不产生任何副作用；`IslandRegistry.extendAll` 对每个适配器 `runCatching`，单个厂商异常不会中断通知。
-  需厂商授权 / 合作的通道（荣耀、OPPO ColorOS 15）由 `IslandVendorConfig` 开关控制，**默认全部关闭**；
-  打开前对应适配器不产生副作用，打开后在设置页显示为「已就绪」。
+  需厂商授权 / 合作的通道（荣耀、OPPO ColorOS 15）由**服务器资料内的持久化开关**控制
+  （`ServerProfile.islandHonor` / `islandOppoFluidCloud`，在设置页「灵动岛适配」分区切换），**默认关闭**；
+  关闭时对应适配器不产生副作用，开启后显示为「已就绪」。OPPO 流体云还需在申请到 `serviceId` 后
+  填入 `OppoFluidCloud.serviceId`（代码级常量）。
 - `system/TaskNotifications.kt`：`build` / `buildSummary` 构建通知后调用 `IslandRegistry.extendAll`；
   总览通知额外承载 Android 16 提升所需属性，并提供 `promotedNotificationSettingsIntent()` 跳转授权页。
 - `ui/Screens.kt` 设置页「灵动岛适配」分区：列出各通道的 `已就绪 / 待授权 / 不支持` 与说明，并在需要时提供授权按钮。
@@ -50,15 +52,15 @@
 ### OPPO ColorOS 15 流体云（骨架就绪，待合作）
 1. 在 OPPO 开放平台「接入准备」确认需求并获得 `serviceId`、`client_id` / `client_secret`。
 2. 端侧按「意图共享」数据结构通过 `ContentProviderClient` 创建 / 更新 / 结束，`actionStatus = 0/1/2`。
-3. 实现 `OppoFluidCloudTransport` 并注入 `IslandVendorConfig.oppoFluidCloudTransport`，填入
-   `IslandVendorConfig.oppoFluidCloudServiceId`，再置 `oppoFluidCloudEnabled = true` 即启用。
+3. 实现 `OppoFluidCloudTransport` 并注入 `OppoFluidCloud.transport`，在 `OppoFluidCloud.serviceId` 填入
+   `serviceId`，再在设置页开启「OPPO 流体云（ColorOS 15）」开关即启用。
    `OppoFluidCloudAdapter` 已负责构建意图 JSON（`intentName` / `actionStatus` / `capsule` / `primary`），
    SDK 细节留在传输层，便于在无厂商环境下构建与测试。
 
 ### 荣耀灵动胶囊（骨架就绪，待合作）
 1. 完成荣耀开发者企业认证，提交快捷服务 / 卡片模板申请并进入白名单。
 2. 胶囊由 YOYO 建议服务呈现，非通行的通知 extras 通道；需与荣耀确认可用模板与下发方式。
-3. 对接层就绪后置 `IslandVendorConfig.honorCapsuleEnabled = true`；`HonorIslandAdapter` 不会写入
+3. 对接层就绪后在设置页开启「荣耀灵动胶囊」开关（持久化于服务器资料）；`HonorIslandAdapter` 不会写入
    `notification.extras`，避免干扰标准提示。
 
 ## 真机验收清单
@@ -76,4 +78,4 @@
 - 华为实况窗需鸿蒙原生应用，Android APK 不可用。
 - 各厂商对刷新频率与展示时长有限制（vivo 见上；小米、OPPO 各有销卡/超时规则）。
 - 本文件中的「已接入」仅表示代码路径就绪，**不代表已在实体设备上验收通过**。
-- 荣耀与 OPPO ColorOS 15 目前仅为骨架，且在厂商权限 / 对接就绪前由 `IslandVendorConfig` 开关保持关闭，不产生任何行为。
+- 荣耀与 OPPO ColorOS 15 目前仅为骨架，且在厂商权限 / 对接就绪前由服务器资料内的开关保持关闭，不产生任何行为。

@@ -1,5 +1,6 @@
 package com.igng.opencode.mobile.system
 
+import com.igng.opencode.mobile.core.ServerProfile
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -13,10 +14,8 @@ import org.junit.Test
  */
 class IslandRegistryTest {
   @After fun resetVendorConfig() {
-    IslandVendorConfig.honorCapsuleEnabled = false
-    IslandVendorConfig.oppoFluidCloudEnabled = false
-    IslandVendorConfig.oppoFluidCloudServiceId = ""
-    IslandVendorConfig.oppoFluidCloudTransport = NoopOppoFluidCloudTransport
+    OppoFluidCloud.serviceId = ""
+    OppoFluidCloud.transport = NoopOppoFluidCloudTransport
   }
 
   @Test fun adaptersExposeStableVendorIds() {
@@ -34,23 +33,21 @@ class IslandRegistryTest {
     assertEquals(5, vendors.size)
   }
 
-  @Test fun skeletonChannelsAreDisabledByDefault() {
-    assertFalse(IslandVendorConfig.honorCapsuleEnabled)
-    assertFalse(IslandVendorConfig.oppoFluidCloudEnabled)
-    assertEquals("", IslandVendorConfig.oppoFluidCloudServiceId)
+  @Test fun vendorChannelsDefaultOffInProfile() {
+    val profile = ServerProfile(id = "id", name = "n", url = "https://x")
+    assertFalse(profile.islandHonor)
+    assertFalse(profile.islandOppoFluidCloud)
   }
 
   @Test fun oppoTransportIsInjectable() {
     var published: Pair<String, String>? = null
-    IslandVendorConfig.oppoFluidCloudTransport = object : OppoFluidCloudTransport {
+    OppoFluidCloud.transport = object : OppoFluidCloudTransport {
       override fun publish(context: android.content.Context, serviceId: String, payload: String) {
         published = serviceId to payload
       }
     }
-    IslandVendorConfig.oppoFluidCloudEnabled = true
-    IslandVendorConfig.oppoFluidCloudServiceId = "999900001"
-    assertEquals("999900001", IslandVendorConfig.oppoFluidCloudServiceId)
-    assertTrue(IslandVendorConfig.oppoFluidCloudEnabled)
+    OppoFluidCloud.serviceId = "999900001"
+    assertEquals("999900001", OppoFluidCloud.serviceId)
     // 传输未被 extend 调用时不应有副作用。
     assertEquals(null, published)
   }

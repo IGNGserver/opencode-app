@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import com.igng.opencode.mobile.R
+import com.igng.opencode.mobile.core.ServerProfile
 import org.json.JSONObject
 
 /** 灵动岛 / 实时活动在某一设备上的可用状态，用于设置页展示与诊断。 */
@@ -26,25 +27,19 @@ data class IslandSupport(
  */
 internal interface IslandAdapter {
   val vendor: String
-  /** 当前设备是否支持该通道，以及权限是否就绪。 */
-  fun support(context: Context): IslandSupport
+  /** 当前设备是否支持该通道，以及权限是否就绪。[profile] 为当前服务器资料，携带各通道开关。 */
+  fun support(context: Context, profile: ServerProfile?): IslandSupport
   /** 在不改变通知语义的前提下，向 [notification] 附加该通道所需的 extras。 */
-  fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean)
+  fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean)
 }
 
 /**
- * 需要厂商授权 / 合作的灵动岛通道开关。默认全部关闭；获得厂商权限后只需在此打开并填入配对参数，
- * 无需改动通知构建逻辑。关闭时对应适配器完全不产生副作用。
+ * OPPO ColorOS 15 流体云所需的一次性参数与实际下发实现。`serviceId` 由 OPPO 开放平台分配，
+ * 申请到后填入；`transport` 由接入方在拿到意图共享接口后注入，默认空实现，便于无厂商环境构建。
  */
-internal object IslandVendorConfig {
-  /** 荣耀灵动胶囊：需荣耀开发者企业认证与白名单，非运行时通知 extras 通道。 */
-  var honorCapsuleEnabled = false
-  /** OPPO ColorOS 15 流体云（意图共享）：需开放平台分配 serviceId。 */
-  var oppoFluidCloudEnabled = false
-  /** OPPO 流体云卡片 ID，申请后填入。 */
-  var oppoFluidCloudServiceId = ""
-  /** OPPO 流体云传输实现；默认空实现，接入厂商 SDK / ContentProviderClient 后注入。 */
-  var oppoFluidCloudTransport: OppoFluidCloudTransport = NoopOppoFluidCloudTransport
+internal object OppoFluidCloud {
+  var serviceId = ""
+  var transport: OppoFluidCloudTransport = NoopOppoFluidCloudTransport
 }
 
 /** 把构建好的流体云意图交给 OPPO 通道。默认空实现，便于在不依赖厂商环境时构建与测试。 */
@@ -63,13 +58,13 @@ internal object IslandRegistry {
     XiaomiIslandAdapter, VivoIslandAdapter, HonorIslandAdapter, OppoFluidCloudAdapter, StandardLiveUpdateAdapter
   )
 
-  fun extendAll(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
-    adapters.forEach { runCatching { it.extend(context, notification, title, detail, running) } }
+  fun extendAll(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+    adapters.forEach { runCatching { it.extend(context, profile, notification, title, detail, running) } }
   }
 
   /** 全部通道的可用状态；[context] 用于读取厂商协议版本与标准通道权限。可能较慢，请在 IO 线程调用。 */
-  fun diagnostics(context: Context): List<IslandSupport> = adapters.map { adapter ->
-    runCatching { adapter.support(context) }
+  fun diagnostics(context: Context, profile: ServerProfile?): List<IslandSupport> = adapters.map { adapter ->
+    runCatching { adapter.support(context, profile) }
       .getOrElse { IslandSupport(adapter.vendor, "检测失败", false, false, it.message.orEmpty()) }
   }
 
@@ -94,7 +89,7 @@ internal object XiaomiIslandAdapter : IslandAdapter {
     context.contentResolver.call(uri, "canShowFocus", null, extras)?.getBoolean("canShowFocus", false) == true
   }.getOrDefault(false)
 
-  override fun support(context: Context): IslandSupport {
+  override fun support(context: Context, profile: ServerProfile?): IslandSupport {
     val version = protocolVersion(context)
     return IslandSupport(
       vendor = vendor,
@@ -109,7 +104,7 @@ internal object XiaomiIslandAdapter : IslandAdapter {
     )
   }
 
-  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
     val version = protocolVersion(context)
     if (version < 3) return
     val iconKey = "miui.focus.pic_app"
@@ -143,7 +138,7 @@ internal object VivoIslandAdapter : IslandAdapter {
     return "vivo" in brand || "iqoo" in brand
   }
 
-  override fun support(context: Context): IslandSupport = IslandSupport(
+  override fun support(context: Context, profile: ServerProfile?): IslandSupport = IslandSupport(
     vendor = vendor,
     label = "vivo 原子岛（原子通知）",
     supported = isVivo(),
@@ -152,7 +147,7 @@ internal object VivoIslandAdapter : IslandAdapter {
            else "当前设备不是 vivo / iQOO。"
   )
 
-  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
     if (!isVivo()) return
     val extras = Bundle()
     // 0=创建，1=更新，2=结束。客户端本地接口没有“首次创建”的显式信号，采用 operation=1（更新），
@@ -175,36 +170,37 @@ internal object VivoIslandAdapter : IslandAdapter {
 
 /**
  * 荣耀 MagicOS 灵动胶囊 / YOYO 建议。属于白名单制的“快捷服务 / 卡片模板”通道，非通行运行时通知
- * extras，需荣耀开发者企业认证与专项对接，因此默认关闭。开启后本适配器标记“已就绪”，
- * 实际下发由荣耀对接层完成（待厂商提供具体协议）。
+ * extras，需荣耀开发者企业认证与专项对接，因此默认关闭（由服务器资料里的 `islandHonor` 开关控制）。
+ * 开启后本适配器标记“已就绪”，实际下发由荣耀对接层完成。
  */
 internal object HonorIslandAdapter : IslandAdapter {
   override val vendor = "honor"
 
   private fun isHonor(): Boolean = "honor" in brandKey()
+  private fun enabled(profile: ServerProfile?): Boolean = profile?.islandHonor == true
 
-  override fun support(context: Context): IslandSupport = IslandSupport(
+  override fun support(context: Context, profile: ServerProfile?): IslandSupport = IslandSupport(
     vendor = vendor,
     label = "荣耀灵动胶囊（YOYO 建议）",
-    supported = isHonor() && IslandVendorConfig.honorCapsuleEnabled,
+    supported = isHonor() && enabled(profile),
     granted = false,
     note = when {
       !isHonor() -> "当前设备不是荣耀。"
-      !IslandVendorConfig.honorCapsuleEnabled -> "该通道需荣耀开发者企业认证与白名单，当前未开启。"
+      !enabled(profile) -> "该通道需荣耀开发者企业认证与白名单，当前未开启。"
       else -> "通道已开启；灵动胶囊的呈现由荣耀审核与 YOYO 建议服务控制。"
     }
   )
 
-  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
-    if (!isHonor() || !IslandVendorConfig.honorCapsuleEnabled) return
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+    if (!isHonor() || !enabled(profile)) return
     // 荣耀通道走独立对接（非通知 extras），此处按约定不写入 notification.extras，避免影响标准提示。
   }
 }
 
 /**
  * OPPO ColorOS 15 流体云（意图共享）。端侧通过「意图共享」创建 / 更新 / 结束，`actionStatus = 0/1/2`；
- * 需开放平台分配 `serviceId`。为不依赖厂商环境即可构建测试，实际下发通过
- * [IslandVendorConfig.oppoFluidCloudTransport] 注入；默认空实现。ColorOS 16 无需此通道，走标准 Live Updates。
+ * 需开放平台分配 `serviceId`。为不依赖厂商环境即可构建测试，实际下发通过 [OppoFluidCloud.transport]
+ * 注入；默认空实现。ColorOS 16 无需此通道，走标准 Live Updates。
  */
 internal object OppoFluidCloudAdapter : IslandAdapter {
   override val vendor = "oppo"
@@ -214,22 +210,22 @@ internal object OppoFluidCloudAdapter : IslandAdapter {
     "oppo" in brand || "oneplus" in brand || "realme" in brand
   }
 
-  private fun enabled(): Boolean = IslandVendorConfig.oppoFluidCloudEnabled && IslandVendorConfig.oppoFluidCloudServiceId.isNotBlank()
+  private fun enabled(profile: ServerProfile?): Boolean = profile?.islandOppoFluidCloud == true && OppoFluidCloud.serviceId.isNotBlank()
 
-  override fun support(context: Context): IslandSupport = IslandSupport(
+  override fun support(context: Context, profile: ServerProfile?): IslandSupport = IslandSupport(
     vendor = vendor,
     label = "OPPO 流体云（ColorOS 15 意图共享）",
-    supported = isOppo() && enabled(),
-    granted = enabled(),
+    supported = isOppo() && enabled(profile),
+    granted = enabled(profile),
     note = when {
       !isOppo() -> "当前设备不是 OPPO / 一加 / realme。"
-      !enabled() -> "该通道需 OPPO 开放平台分配 serviceId，当前未开启；ColorOS 16 走标准实时更新即可。"
+      !enabled(profile) -> "该通道需 OPPO 开放平台分配 serviceId，当前未开启；ColorOS 16 走标准实时更新即可。"
       else -> "通道已开启；请确认真机系统为 ColorOS 15 且意图共享特性开关已打开。"
     }
   )
 
-  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) {
-    if (!isOppo() || !enabled()) return
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) {
+    if (!isOppo() || !enabled(profile)) return
     val payload = JSONObject()
       .put("intentName", "OpenCode.TaskSummary")
       .put("actionStatus", if (running) 1 else 0) // 0=创建，1=更新；结束由取消通知触发
@@ -238,7 +234,7 @@ internal object OppoFluidCloudAdapter : IslandAdapter {
       .put("capsule", JSONObject().put("rightText", detail.take(20)))
       .put("primary", JSONObject().put("title", title.take(40)).put("content", detail.take(100)))
       .toString()
-    runCatching { IslandVendorConfig.oppoFluidCloudTransport.publish(context, IslandVendorConfig.oppoFluidCloudServiceId, payload) }
+    runCatching { OppoFluidCloud.transport.publish(context, OppoFluidCloud.serviceId, payload) }
   }
 }
 
@@ -250,7 +246,7 @@ internal object OppoFluidCloudAdapter : IslandAdapter {
 internal object StandardLiveUpdateAdapter : IslandAdapter {
   override val vendor = "android"
 
-  override fun support(context: Context): IslandSupport {
+  override fun support(context: Context, profile: ServerProfile?): IslandSupport {
     val api = Build.VERSION.SDK_INT >= 36
     val manager = context.getSystemService(NotificationManager::class.java)
     val granted = api && runCatching { manager?.canPostPromotedNotifications() == true }.getOrDefault(false)
@@ -267,5 +263,5 @@ internal object StandardLiveUpdateAdapter : IslandAdapter {
     )
   }
 
-  override fun extend(context: Context, notification: Notification, title: String, detail: String, running: Boolean) = Unit
+  override fun extend(context: Context, profile: ServerProfile?, notification: Notification, title: String, detail: String, running: Boolean) = Unit
 }

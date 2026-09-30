@@ -100,7 +100,7 @@ class TaskNotifications(private val context: Context) {
       builder.addAction(0, "回答", open(profile.id, session.id))
     }
     val notification = builder.build()
-    IslandRegistry.extendAll(context, notification, title, body, running)
+    IslandRegistry.extendAll(context, profile, notification, title, body, running)
     return notification
   }
   private fun permissionSummary(permission: PermissionRequest): String = buildString {
@@ -154,7 +154,7 @@ class TaskNotifications(private val context: Context) {
       .setShortCriticalText(summary.shortText)
     targetSessionId?.let { builder.setContentIntent(open(profile.id, it)) }
     val notification = builder.build()
-    IslandRegistry.extendAll(context, notification, "OpenCode 任务总览", text, running = summary.running > 0)
+    IslandRegistry.extendAll(context, profile, notification, "OpenCode 任务总览", text, running = summary.running > 0)
     return notification
   }
 
