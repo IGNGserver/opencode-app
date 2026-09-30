@@ -10,6 +10,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.semantics.contentDescription
@@ -25,6 +26,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.mobile.core.*
 import kotlinx.coroutines.launch
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.extra.SuperDialog
@@ -33,6 +36,8 @@ import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 private enum class DetailTab(val label: String) { CHAT("对话"), TODO("待办"), CHANGES("改动"), FILES("文件"), CHILDREN("子任务") }
 
@@ -165,25 +170,45 @@ fun ChatScreen(
       )
     }
 
-    // 主内容面板
-    Box(Modifier.weight(1f)) {
-      when (tab) {
-        DetailTab.CHAT -> Conversation(state, controller, Modifier.fillMaxSize())
-        DetailTab.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
-        DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
-        DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
-          val key = "${state.serverId}:${state.sessionId}"
-          val current = drafts[key].orEmpty()
-          editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
-          tab = DetailTab.CHAT
-        }, Modifier.fillMaxSize())
-        DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
-      }
-    }
+    // 主内容面板与底部输入舱
+    val chatBackdrop = rememberLayerBackdrop()
+    CompositionLocalProvider(LocalBackdrop provides chatBackdrop) {
+      Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+          Modifier
+            .fillMaxSize()
+            .layerBackdrop(chatBackdrop)
+        ) {
+          when (tab) {
+            DetailTab.CHAT -> Conversation(
+              state,
+              controller,
+              Modifier.fillMaxSize(),
+              contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp)
+            )
+            DetailTab.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
+            DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
+            DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
+              val key = "${state.serverId}:${state.sessionId}"
+              val current = drafts[key].orEmpty()
+              editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
+              tab = DetailTab.CHAT
+            }, Modifier.fillMaxSize())
+            DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
+          }
+        }
 
-    // 底部输入区域仅在 Chat Tab 下展示 (增强为 Liquid Glass 悬浮输入舱)
-    if (tab == DetailTab.CHAT) {
-      MiuixLiquidComposer(state, controller, drafts)
+        // 底部输入区域仅在 Chat Tab 下展示 (悬浮 Liquid Glass 交互舱)
+        if (tab == DetailTab.CHAT) {
+          Box(
+            modifier = Modifier
+              .align(Alignment.BottomCenter)
+              .fillMaxWidth()
+          ) {
+            MiuixLiquidComposer(state, controller, drafts, backdrop = chatBackdrop)
+          }
+        }
+      }
     }
   }
 
@@ -342,8 +367,14 @@ private fun MiuixMenuActionItem(
 }
 
 @Composable
-private fun Conversation(state: MobileState, controller: MobileController, modifier: Modifier = Modifier) {
+private fun Conversation(
+  state: MobileState,
+  controller: MobileController,
+  modifier: Modifier = Modifier,
+  contentPadding: PaddingValues = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp)
+) {
   val list = rememberLazyListState()
+  val scope = rememberCoroutineScope()
   val permissions = state.permissions.filter { it.sessionId == state.sessionId }
   val questions = state.questions.filter { it.sessionId == state.sessionId }
   val total = state.messages.size + permissions.size + questions.size
@@ -356,32 +387,70 @@ private fun Conversation(state: MobileState, controller: MobileController, modif
     if (total > 0) list.animateScrollToItem(total - 1)
   }
 
-  LazyColumn(
-    modifier = modifier
-      .fillMaxWidth()
-      .overScrollVertical(),
-    state = list,
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp),
-    verticalArrangement = Arrangement.spacedBy(14.dp)
-  ) {
-    if (state.messages.isEmpty() && permissions.isEmpty() && questions.isEmpty()) {
-      item {
-        Card(
-          insideMargin = PaddingValues(20.dp),
-          colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainer)
-        ) {
-          Text("会话就绪", style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.Bold))
-          Spacer(Modifier.height(6.dp))
-          Text(
-            "在下方输入指令开始工作，或引用工程文件、使用快捷命令与专用 Agent。",
-            style = MiuixTheme.textStyles.body2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          )
+  val showScrollToBottom by remember {
+    derivedStateOf {
+      val layoutInfo = list.layoutInfo
+      val visibleItems = layoutInfo.visibleItemsInfo
+      if (visibleItems.isEmpty() || total <= 2) false
+      else visibleItems.last().index < total - 2
+    }
+  }
+
+  Box(modifier = modifier) {
+    LazyColumn(
+      modifier = Modifier
+        .fillMaxSize()
+        .overScrollVertical(),
+      state = list,
+      contentPadding = contentPadding,
+      verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+      if (state.messages.isEmpty() && permissions.isEmpty() && questions.isEmpty()) {
+        item {
+          Card(
+            insideMargin = PaddingValues(20.dp),
+            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainer)
+          ) {
+            Text("会话就绪", style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.Bold))
+            Spacer(Modifier.height(6.dp))
+            Text(
+              "在下方输入指令开始工作，或引用工程文件、使用快捷命令与专用 Agent。",
+              style = MiuixTheme.textStyles.body2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            )
+          }
         }
       }
+      items(state.messages, key = { "message-${it.id}" }) { message -> MiuixMessageCard(message) }
+      items(permissions, key = { "permission-${it.id}" }) { MiuixPermissionCard(it, controller, state.supportsSavedPermissions) }
+      items(questions, key = { "question-${it.id}" }) { MiuixQuestionCard(it, controller) }
     }
-    items(state.messages, key = { "message-${it.id}" }) { message -> MiuixMessageCard(message) }
-    items(permissions, key = { "permission-${it.id}" }) { MiuixPermissionCard(it, controller, state.supportsSavedPermissions) }
-    items(questions, key = { "question-${it.id}" }) { MiuixQuestionCard(it, controller) }
+
+    // 悬浮水滴下滑 FAB 按钮 (Liquid Scroll-to-Bottom FAB)
+    androidx.compose.animation.AnimatedVisibility(
+      visible = showScrollToBottom,
+      enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(spring(stiffness = Spring.StiffnessMedium)),
+      exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
+      modifier = Modifier
+        .align(Alignment.BottomEnd)
+        .padding(end = 16.dp, bottom = 148.dp)
+    ) {
+      LiquidGlassSurface(
+        modifier = Modifier.size(42.dp),
+        cornerRadius = 21.dp,
+        onClick = {
+          if (total > 0) {
+            scope.launch { list.animateScrollToItem(total - 1) }
+          }
+        }
+      ) {
+        Icon(
+          imageVector = MiuixIcons.Back,
+          contentDescription = "回到底部",
+          tint = MiuixTheme.colorScheme.primary,
+          modifier = Modifier.size(20.dp).align(Alignment.Center).rotate(-90f)
+        )
+      }
+    }
   }
 }
 
@@ -777,7 +846,8 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: MobileController) {
 private fun MiuixLiquidComposer(
   state: MobileState,
   controller: MobileController,
-  drafts: MutableMap<String, String>
+  drafts: MutableMap<String, String>,
+  backdrop: com.kyant.backdrop.Backdrop? = LocalBackdrop.current
 ) {
   val draftKey = "${state.serverId}:${state.sessionId}"
   var filePicker by remember { mutableStateOf(false) }
@@ -824,18 +894,19 @@ private fun MiuixLiquidComposer(
       horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically
     ) {
-      LiquidActionCapsule("📎 @文件") { filePicker = true }
+      LiquidActionCapsule("📎 @文件", backdrop = backdrop) { filePicker = true }
       if (state.commands.isNotEmpty()) {
-        LiquidActionCapsule("⚡ /命令") { commandPicker = true }
+        LiquidActionCapsule("⚡ /命令", backdrop = backdrop) { commandPicker = true }
       }
-      LiquidActionCapsule("🤖 " + (state.agent ?: "默认 Agent")) { agentSheet = true }
-      LiquidActionCapsule("🧠 " + (state.model?.label ?: "默认模型")) { modelSheet = true }
+      LiquidActionCapsule("🤖 " + (state.agent ?: "默认 Agent"), backdrop = backdrop) { agentSheet = true }
+      LiquidActionCapsule("🧠 " + (state.model?.label ?: "默认模型"), backdrop = backdrop) { modelSheet = true }
     }
 
     // 输入舱核心 Surface (液态玻璃质感)
     LiquidGlassSurface(
       modifier = Modifier.fillMaxWidth(),
-      cornerRadius = 22.dp
+      cornerRadius = 22.dp,
+      backdrop = backdrop
     ) {
       Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
         Box(Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 130.dp)) {
@@ -1031,9 +1102,14 @@ private fun MiuixLiquidComposer(
 }
 
 @Composable
-private fun LiquidActionCapsule(label: String, onClick: () -> Unit) {
+private fun LiquidActionCapsule(
+  label: String,
+  backdrop: com.kyant.backdrop.Backdrop? = LocalBackdrop.current,
+  onClick: () -> Unit
+) {
   LiquidGlassSurface(
     cornerRadius = 14.dp,
+    backdrop = backdrop,
     onClick = onClick
   ) {
     Text(

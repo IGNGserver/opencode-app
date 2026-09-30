@@ -70,6 +70,7 @@ dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
   implementation("com.google.firebase:firebase-messaging:25.0.1")
   implementation("io.github.kyant0:shapes-android:1.2.0")
+  implementation("io.github.kyant0:backdrop:1.0.6")
   implementation("top.yukonga.miuix.kmp:miuix-android:0.8.8")
   implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.8.8")
   testImplementation("junit:junit:4.13.2")
