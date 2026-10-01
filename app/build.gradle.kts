@@ -7,24 +7,24 @@ if (file("google-services.json").exists()) pluginManager.apply("com.google.gms.g
 
 // Local release builds may use the debug key for verification. Every publishing build sets
 // REQUIRE_RELEASE_SIGNING and must use the protected keystore and fixed certificate.
-val releaseKeystorePath: String? = System.getenv("OPENCODE_MOBILE_KEYSTORE_FILE")
-val releaseKeystorePassword: String? = System.getenv("OPENCODE_MOBILE_KEYSTORE_PASSWORD")
-val releaseKeyAlias: String? = System.getenv("OPENCODE_MOBILE_KEY_ALIAS")
-val releaseKeyPassword: String? = System.getenv("OPENCODE_MOBILE_KEY_PASSWORD")
+val releaseKeystorePath: String? = System.getenv("OPENCODE_LAGOON_KEYSTORE_FILE")
+val releaseKeystorePassword: String? = System.getenv("OPENCODE_LAGOON_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = System.getenv("OPENCODE_LAGOON_KEY_ALIAS")
+val releaseKeyPassword: String? = System.getenv("OPENCODE_LAGOON_KEY_PASSWORD")
 val hasReleaseSigning = listOf(releaseKeystorePath, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrBlank() }
 
-if (System.getenv("OPENCODE_MOBILE_REQUIRE_RELEASE_SIGNING") == "true") {
+if (System.getenv("OPENCODE_LAGOON_REQUIRE_RELEASE_SIGNING") == "true") {
   require(hasReleaseSigning && file(releaseKeystorePath!!).isFile) { "发布构建必须提供完整的稳定签名输入" }
 }
 android {
-  namespace = "com.igng.opencode.mobile"
+  namespace = "com.igng.opencode.lagoon"
   compileSdk = 36
   defaultConfig {
-    applicationId = "com.igng.opencode.mobile"
+    applicationId = "com.igng.opencode.lagoon"
     minSdk = 26
     targetSdk = 36
-    versionCode = System.getenv("OPENCODE_MOBILE_VERSION_CODE")?.toInt() ?: 3
-    versionName = System.getenv("OPENCODE_MOBILE_VERSION_NAME") ?: "0.1.0"
+    versionCode = System.getenv("OPENCODE_LAGOON_VERSION_CODE")?.toInt() ?: 3
+    versionName = System.getenv("OPENCODE_LAGOON_VERSION_NAME") ?: "0.1.0"
   }
   if (hasReleaseSigning) {
     signingConfigs {
