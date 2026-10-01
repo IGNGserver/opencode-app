@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import {createServer} from 'node:http'
 import {mkdtemp, mkdir, readFile, writeFile, rm} from 'node:fs/promises'
@@ -7,16 +7,28 @@ import {createCompanion, mapEvent, signPushPayload, signPushPayloadV1} from '../
 import {createEventForwarder, classifyTool, OpenCodeLagoonPlugin} from '../opencode-lagoon.plugin.js'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 async function until(f) { for (let i=0;i<300;i++) { if (await f()) return; await sleep(5) } throw Error('timed out') }
+const tempDirs = []
+after(async () => { for (const dir of tempDirs.splice(0)) await rm(dir, {recursive:true, force:true}) })
 async function fixture(t, send = async () => {}, extra = {}) {
   const dir = await mkdtemp('/tmp/opencode-companion-test-')
+  tempDirs.push(dir)
   const options = {pluginSecret:'inbound-fixture',pushSecret:'push-fixture',registryFile:dir+'/state.json',verifyDevice:async a=>a==='Basic fixture',send,fetchSession:async()=>({title:'Task'}),retryDelayMs:10,...extra}
   const app = createCompanion(options);await app.load()
   const server=createServer(app.handle).listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r))
-  const post = (path, data, auth='Basic fixture')=>fetch(`http://127.0.0.1:${server.address().port}${path}`, {method:'POST',headers:{authorization:auth,'x-opencode-lagoon-secret':'inbound-fixture'},body:JSON.stringify(data)})
+  const post = async (path, data, auth='Basic fixture') => {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}${path}`, {method:'POST',headers:{authorization:auth,'x-opencode-lagoon-secret':'inbound-fixture'},body:JSON.stringify(data)})
+    const text = await res.text()
+    return new Response(text, {status:res.status, statusText:res.statusText, headers:res.headers})
+  }
   const register = (id='device')=>post('/v1/devices',{deviceId:id,serverKey:'srv',profileId:'profile',token:'token-'+id})
   const event=(type,props={})=>post('/v1/events',{type,serverKey:'srv',sessionId:'ses',directory:'/repo',...props})
-  const close=async()=>{await app.close();await new Promise(r=>server.close(r))}
-  t.after(async()=>{await close();await rm(dir,{recursive:true,force:true})})
+  const close=async()=>{
+    try { await app.close() } finally {
+      server.closeAllConnections?.()
+      await new Promise((resolve,reject)=>server.close(err=>{ if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') reject(err); else resolve() }))
+    }
+  }
+  t.after(close)
   return {dir,options,app,post,register,event,close}
 }
 test('shared task contract and raw tool categories remain equivalent',()=>{
@@ -119,6 +131,7 @@ test('plugin spool retries HTTP failure and preserves identity across restart',a
 })
 test('real plugin projection keeps private command/output out of the durable spool',async t=>{
  const dir=await mkdtemp('/tmp/opencode-plugin-projection-'), old={...process.env},oldFetch=globalThis.fetch,bodies=[]
+ tempDirs.push(dir)
  Object.assign(process.env,{OPENCODE_LAGOON_PLUGIN_QUEUE_DIR:dir,OPENCODE_LAGOON_COMPANION_URL:'http://127.0.0.1',OPENCODE_LAGOON_PLUGIN_SECRET:'fixture',OPENCODE_LAGOON_SERVER_KEY:'srv'})
  globalThis.fetch=async(_u,o)=>{bodies.push(JSON.parse(o.body));return {status:202}}
  try {
@@ -126,5 +139,5 @@ test('real plugin projection keeps private command/output out of the durable spo
   await plugin.event({event:{type:'message.part.updated',properties:{sessionID:'s',part:{type:'tool',name:'bash',state:{input:{command:'gradle test PRIVATE'},output:'PRIVATE'}}}}})
   await until(()=>bodies.length===1);assert.equal(bodies[0].toolKind,'TESTING');assert.equal(JSON.stringify(bodies).includes('PRIVATE'),false)
   await sleep(30)
- }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_LAGOON_PLUGIN_QUEUE_DIR','OPENCODE_LAGOON_COMPANION_URL','OPENCODE_LAGOON_PLUGIN_SECRET','OPENCODE_LAGOON_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}await rm(dir,{recursive:true})}
+ }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_LAGOON_PLUGIN_QUEUE_DIR','OPENCODE_LAGOON_COMPANION_URL','OPENCODE_LAGOON_PLUGIN_SECRET','OPENCODE_LAGOON_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}}
 })
