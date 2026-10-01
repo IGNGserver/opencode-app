@@ -73,8 +73,9 @@ class MobileController private constructor(private val appContext: Context) {
    */
   private fun withSummary(state: MobileState): MobileState = state.copy(
     summary = TaskSummary.of(state.tasks, state.acknowledged),
-    summaryTargetId = state.tasks.values
-      .firstOrNull { it.phase in TERMINAL_PHASES && it.sessionId !in state.acknowledged }?.sessionId
+    // Prefer a session that needs a reply; otherwise jump to the first unread terminal result.
+    summaryTargetId = state.tasks.values.firstOrNull { it.phase in TaskState.WAITING_PHASES }?.sessionId
+      ?: state.tasks.values.firstOrNull { it.phase in TERMINAL_PHASES && it.sessionId !in state.acknowledged }?.sessionId
   )
   private val store = ServerStore(appContext)
   private val cache = OfflineCache(appContext)
@@ -175,7 +176,8 @@ class MobileController private constructor(private val appContext: Context) {
     val rememberedProject = if (store.selectedId() == id) store.selectedProject() else null
     val rememberedSession = if (store.selectedId() == id) store.selectedSession() else null
     store.select(id, rememberedProject, rememberedSession)
-    mutable.update { MobileState(profiles = store.profiles(), serverId = id, loading = true, message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
+    mutable.update { MobileState(profiles = store.profiles(), serverId = id, loading = true, acknowledged = store.acknowledgedTasks(id),
+      message = if (leaving != null) "已结束上一服务器的本地监控；远端任务继续运行。" else null) }
     scope.launch {
       try {
         loadAll(token)
@@ -479,8 +481,10 @@ class MobileController private constructor(private val appContext: Context) {
     val project = mutable.value.projects.firstOrNull { it.directory == session.directory }
     val offline = mutable.value.cached && !mutable.value.connected
     val messages = emptyList<Message>()
-    // Opening a session reads its result: stop counting it as unread on the island immediately.
+    // Opening a session reads its result: stop counting it as unread on the island immediately, and
+    // persist it so the durable background summary agrees after the App is later killed.
     val acknowledged = mutable.value.acknowledged + id
+    mutable.value.serverId?.let { store.acknowledgeTask(it, id) }
     mutable.update { withSummary(it.copy(projectId = project?.id ?: it.projectId, sessionId = id, messages = messages,
       todos = emptyList(), children = emptyList(), changes = emptyList(), files = emptyList(),
       searchResults = emptyList(), fileText = null, fileBinary = false, acknowledged = acknowledged)) }
