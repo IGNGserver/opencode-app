@@ -8,6 +8,18 @@
 - 每一个 tag 都必须新增 `docs/releases/<tag>.md`，内容用中文说明本次更新、验证结果和已知限制。工作流会在缺少文件时直接失败。
 - 版本号使用 `vMAJOR.MINOR.PATCH`；预发布版本在末尾追加 `-alpha.N`、`-beta.N` 或 `-rc.N`，例如 `v0.1.0-rc.1`。
 
+## GitHub Release 与 tag 的关系
+
+- git tag 和 GitHub Release 是两样东西：推 tag 只会出现在 Tags 页面，只有工作流跑到「发布 GitHub Release」步骤才会在 Releases 页面出现条目。
+- 因此「Releases 页面找不到某个版本」只有两种原因：这一步没跑到（构建或测试失败、超时、被取消），或者根本没这个 tag。
+- GitHub 的 “Latest” 标记、仓库首页的 Releases 卡片和 `releases/latest` 接口**只认正式版**，pre-release 永远不会被标成 Latest；这是 GitHub 的行为，不是发布失败。需要在首页可见时，用 `release` 类型发布该版本。
+
+## 发布失败后的恢复
+
+- 发布步骤是幂等的：Release 已存在时更新说明并覆盖同名 APK 产物，因此对同一个 tag 重跑工作流是安全的。
+- 恢复方式：Actions → `发布 OpenCode Lagoon Release` → Run workflow，`tag` 填缺失的版本号（例如 `v0.1.0-rc.14`），`release_type` 按规范选择。
+- 工作流和 CI 都带 `timeout-minutes`（job 30 分钟、companion 步骤 10 分钟），卡住会以失败结束而不是占着 runner 几小时；失败时「发布结果提示」步骤会在日志里指出这个 tag 还没有 Release。
+
 ## 稳定签名与产物
 
 - 预发布和正式版都必须使用同一套受保护的稳定签名，均构建非 debuggable 的 Release APK；CI 不允许调试证书或临时证书回退。
@@ -25,6 +37,7 @@
 3. 创建并推送版本 tag，或手动运行 `发布 OpenCode Lagoon Release` 工作流。
 4. 工作流重新执行 Android 单元测试、Release APK 构建和 companion 测试。
 5. 工作流把中文说明和 APK 一起发布到 GitHub Release。tag 触发默认是 pre-release；手动运行时只有选择 `release` 才会发布正式版。
+6. 第 4、5 步没跑到（失败、超时、被取消）时，这个版本只会出现在 Tags 页面；按上面「发布失败后的恢复」重跑同一个 tag 即可补上 Release。
 
 ## Release 说明与产物命名
 
