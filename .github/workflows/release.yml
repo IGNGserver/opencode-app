@@ -242,8 +242,8 @@ jobs:
             gh release create "$RELEASE_TAG" "$apk_asset" --title "OpenCode Lagoon ${RELEASE_TAG}" --notes-file release-notes.md --verify-tag "${flags[@]}"
           fi
           # 显式核对发布结果，缺失时以失败结束，不要出现「工作流成功但 Release 页面没有版本」。
-          gh release view "$RELEASE_TAG" --json tagName,prerelease,draft,url,assets \
-            --jq '"已发布 \(.tagName)（prerelease=\(.prerelease)，draft=\(.draft)）：\(.url)，产物：\([.assets[].name] | join(", "))"'
+          gh release view "$RELEASE_TAG" --json tagName,isPrerelease,isDraft,url,assets \
+            --jq '"已发布 \(.tagName)（isPrerelease=\(.isPrerelease)，isDraft=\(.isDraft)）：\(.url)，产物：\([.assets[].name] | join(", "))"'
           if ! gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -qx -- "$apk_name"; then
             echo "Release 上缺少 APK 产物：$apk_name" >&2
             exit 1
