@@ -864,16 +864,24 @@ private fun MiuixServerForm(
     }
 
     item {
-      TextField(
-        value = url,
-        onValueChange = { text: String ->
-          url = text
-          if (name.isBlank() && text.isNotBlank()) name = "我的 OpenCode"
-        },
-        label = "服务器地址 或 配对链接",
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-        modifier = Modifier.fillMaxWidth()
-      )
+      Column(Modifier.fillMaxWidth()) {
+        TextField(
+          value = url,
+          onValueChange = { text: String ->
+            url = text
+            if (name.isBlank() && text.isNotBlank()) name = "我的 OpenCode"
+          },
+          label = if (url.isBlank()) "http://192.168.1.x:4096 或配对链接" else "服务器地址 或 配对链接",
+          useLabelAsPlaceholder = url.isBlank(),
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+          modifier = Modifier.fillMaxWidth()
+        )
+        Text(
+          text = "示例：http://192.168.1.100:4096 或 https://oc.example.com。手机无法通过 localhost 访问电脑，请填电脑的局域网 IP 或直接粘贴 opencode pair 配对链接。",
+          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
+          modifier = Modifier.padding(start = 12.dp, top = 4.dp, end = 12.dp)
+        )
+      }
     }
 
     if (!isPair) {
