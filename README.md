@@ -60,7 +60,7 @@ ANDROID_HOME=/path/to/Android/Sdk ./gradlew :app:assembleDebug :app:testDebugUni
 - 深链接：scheme 改为 `opencode-lagoon://`。旧版通知与旧 scheme 链接不会被新包接住，升级后由新包重新发出通知。
 - Firebase：`google-services.json` 按包名绑定，需要在 Firebase 项目里为 `com.igng.opencode.lagoon` 重新添加 Android 应用并放置新配置文件；沿用旧文件会让 Google Services 插件因包名不匹配而构建失败。
 - companion 与插件：文件名 `opencode-lagoon.plugin.js`、环境变量前缀 `OPENCODE_LAGOON_*`、入站头 `x-opencode-lagoon-secret`、状态目录 `~/.local/state/opencode-lagoon/`、npm 包名 `opencode-lagoon-companion`。已有部署请 `mv` 旧状态目录到新路径以保留已注册设备与待发队列，并同步更新两处进程的环境变量与 OpenCode `plugins/` 下的插件文件。
-- CI：仓库 Secrets 由 `OPENCODE_MOBILE_*` 改名为 `OPENCODE_LAGOON_*`，keystore 别名与主文件名改名但证书不变（见 [`docs/ANDROID_SIGNING.md`](docs/ANDROID_SIGNING.md)）。旧名 Secrets 在更名进入 `main` 后删除。
+- CI：仓库 Secrets 由 `OPENCODE_MOBILE_*` 改名为 `OPENCODE_LAGOON_*`，keystore 别名与主文件名改名但证书不变（见 [`docs/ANDROID_SIGNING.md`](docs/ANDROID_SIGNING.md)）。旧的 `OPENCODE_MOBILE_*` Secrets 已随更名进入 `main` 删除；若需要回到更名前的发布工作流，只能按 `docs/ANDROID_SIGNING.md` 从本机 keystore 与口令文件重新写入。
 - `docs/releases/` 下的历史发布说明保持原样，它们记录的是当时实际发布的名称。
 
 ## 验收边界
