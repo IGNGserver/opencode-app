@@ -1,10 +1,10 @@
-application_id=com.igng.opencode.mobile
+application_id=com.igng.opencode.lagoon
 keystore_type=PKCS12
-key_alias=opencode-mobile-release
+key_alias=opencode-lagoon-release
 key_algorithm=RSA-3072/SHA256withRSA
 certificate_sha256=c212ef1e680cc124f6879acdb46258ecebadb0f53bbde2771620aa23acd7abd2
 certificate_expires=Feb 14 09:38:54 2054 GMT
-keystore_sha256=1a48a261e86d96b409110c30e013cb7d027fc5d3bd7d72c60fef3b91bf0813ae
-primary_keystore=/home/lvziw/.config/opencode-app/android-signing/opencode-mobile-release.p12
-primary_password_file=/home/lvziw/.config/opencode-app/android-signing/.env
-nas_encrypted_backup=/home/lvziw/项目/.private/opencode-app/android-signing/opencode-mobile-release.p12
+keystore_sha256=02591c813a8889ad6bf8b78bc75c5edbc75cdd9015653dfbab85bfaa26151ac9
+primary_keystore=/home/lvziw/.config/opencode-lagoon/android-signing/opencode-lagoon-release.p12
+primary_password_file=/home/lvziw/.config/opencode-lagoon/android-signing/.env
+nas_encrypted_backup=/home/lvziw/项目/.private/opencode-lagoon/android-signing/opencode-lagoon-release.p12

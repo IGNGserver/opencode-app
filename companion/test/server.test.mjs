@@ -4,7 +4,7 @@ import {createServer} from 'node:http'
 import {mkdtemp, mkdir, readFile, writeFile, rm} from 'node:fs/promises'
 import {readFileSync} from 'node:fs'
 import {createCompanion, mapEvent, signPushPayload, signPushPayloadV1} from '../src/server.mjs'
-import {createEventForwarder, classifyTool, OpenCodeMobilePlugin} from '../opencode-mobile.plugin.js'
+import {createEventForwarder, classifyTool, OpenCodeLagoonPlugin} from '../opencode-lagoon.plugin.js'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 async function until(f) { for (let i=0;i<300;i++) { if (await f()) return; await sleep(5) } throw Error('timed out') }
 async function fixture(t, send = async () => {}, extra = {}) {
@@ -12,7 +12,7 @@ async function fixture(t, send = async () => {}, extra = {}) {
   const options = {pluginSecret:'inbound-fixture',pushSecret:'push-fixture',registryFile:dir+'/state.json',verifyDevice:async a=>a==='Basic fixture',send,fetchSession:async()=>({title:'Task'}),retryDelayMs:10,...extra}
   const app = createCompanion(options);await app.load()
   const server=createServer(app.handle).listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r))
-  const post = (path, data, auth='Basic fixture')=>fetch(`http://127.0.0.1:${server.address().port}${path}`, {method:'POST',headers:{authorization:auth,'x-opencode-mobile-secret':'inbound-fixture'},body:JSON.stringify(data)})
+  const post = (path, data, auth='Basic fixture')=>fetch(`http://127.0.0.1:${server.address().port}${path}`, {method:'POST',headers:{authorization:auth,'x-opencode-lagoon-secret':'inbound-fixture'},body:JSON.stringify(data)})
   const register = (id='device')=>post('/v1/devices',{deviceId:id,serverKey:'srv',profileId:'profile',token:'token-'+id})
   const event=(type,props={})=>post('/v1/events',{type,serverKey:'srv',sessionId:'ses',directory:'/repo',...props})
   const close=async()=>{await app.close();await new Promise(r=>server.close(r))}
@@ -119,12 +119,12 @@ test('plugin spool retries HTTP failure and preserves identity across restart',a
 })
 test('real plugin projection keeps private command/output out of the durable spool',async t=>{
  const dir=await mkdtemp('/tmp/opencode-plugin-projection-'), old={...process.env},oldFetch=globalThis.fetch,bodies=[]
- Object.assign(process.env,{OPENCODE_MOBILE_PLUGIN_QUEUE_DIR:dir,OPENCODE_MOBILE_COMPANION_URL:'http://127.0.0.1',OPENCODE_MOBILE_PLUGIN_SECRET:'fixture',OPENCODE_MOBILE_SERVER_KEY:'srv'})
+ Object.assign(process.env,{OPENCODE_LAGOON_PLUGIN_QUEUE_DIR:dir,OPENCODE_LAGOON_COMPANION_URL:'http://127.0.0.1',OPENCODE_LAGOON_PLUGIN_SECRET:'fixture',OPENCODE_LAGOON_SERVER_KEY:'srv'})
  globalThis.fetch=async(_u,o)=>{bodies.push(JSON.parse(o.body));return {status:202}}
  try {
-  const plugin=await OpenCodeMobilePlugin({directory:'/repo'})
+  const plugin=await OpenCodeLagoonPlugin({directory:'/repo'})
   await plugin.event({event:{type:'message.part.updated',properties:{sessionID:'s',part:{type:'tool',name:'bash',state:{input:{command:'gradle test PRIVATE'},output:'PRIVATE'}}}}})
   await until(()=>bodies.length===1);assert.equal(bodies[0].toolKind,'TESTING');assert.equal(JSON.stringify(bodies).includes('PRIVATE'),false)
   await sleep(30)
- }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_MOBILE_PLUGIN_QUEUE_DIR','OPENCODE_MOBILE_COMPANION_URL','OPENCODE_MOBILE_PLUGIN_SECRET','OPENCODE_MOBILE_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}await rm(dir,{recursive:true})}
+ }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_LAGOON_PLUGIN_QUEUE_DIR','OPENCODE_LAGOON_COMPANION_URL','OPENCODE_LAGOON_PLUGIN_SECRET','OPENCODE_LAGOON_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}await rm(dir,{recursive:true})}
 })

@@ -5,7 +5,7 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
   <application android:allowBackup="false" android:label="@string/app_name"
-    android:theme="@style/Theme.OpenCodeMobile" android:usesCleartextTraffic="true"
+    android:theme="@style/Theme.OpenCodeLagoon" android:usesCleartextTraffic="true"
     android:enableOnBackInvokedCallback="true"
     android:icon="@drawable/ic_app" android:roundIcon="@drawable/ic_app">
     <activity android:name=".ui.MainActivity" android:exported="true"
@@ -18,12 +18,12 @@
         <action android:name="android.intent.action.VIEW" />
         <category android:name="android.intent.category.DEFAULT" />
         <category android:name="android.intent.category.BROWSABLE" />
-        <data android:scheme="opencode-mobile" android:host="server" />
+        <data android:scheme="opencode-lagoon" android:host="server" />
       </intent-filter>
     </activity>
     <service android:name=".system.TaskMonitorService" android:exported="false"
       android:foregroundServiceType="dataSync" />
-    <service android:name=".push.MobileMessagingService" android:exported="false">
+    <service android:name=".push.LagoonMessagingService" android:exported="false">
       <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
     </service>
     <receiver android:name=".system.NotificationActionReceiver" android:exported="false" />

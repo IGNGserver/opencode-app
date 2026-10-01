@@ -11,8 +11,8 @@
 ## 稳定签名与产物
 
 - 预发布和正式版都必须使用同一套受保护的稳定签名，均构建非 debuggable 的 Release APK；CI 不允许调试证书或临时证书回退。
-- 仓库 Secrets：`OPENCODE_MOBILE_KEYSTORE_BASE64`、`OPENCODE_MOBILE_KEYSTORE_PASSWORD`、`OPENCODE_MOBILE_KEY_ALIAS`、`OPENCODE_MOBILE_KEY_PASSWORD`、`OPENCODE_MOBILE_SIGNING_CERT_SHA256`。最后一项是签名证书 SHA-256 指纹。工作流将 keystore 写入 runner 临时目录，构建后用 apksigner 验证实际证书。
-- 可选 `OPENCODE_MOBILE_FIREBASE_CONFIG_BASE64` 注入 Firebase Android 配置；不配置时仍可发布，但说明必须标注“不含 FCM”，仅填写服务器地址无法启用未编入的 FCM 能力。
+- 仓库 Secrets：`OPENCODE_LAGOON_KEYSTORE_BASE64`、`OPENCODE_LAGOON_KEYSTORE_PASSWORD`、`OPENCODE_LAGOON_KEY_ALIAS`、`OPENCODE_LAGOON_KEY_PASSWORD`、`OPENCODE_LAGOON_SIGNING_CERT_SHA256`。最后一项是签名证书 SHA-256 指纹。工作流将 keystore 写入 runner 临时目录，构建后用 apksigner 验证实际证书。
+- 可选 `OPENCODE_LAGOON_FIREBASE_CONFIG_BASE64` 注入 Firebase Android 配置；不配置时仍可发布，但说明必须标注“不含 FCM”，仅填写服务器地址无法启用未编入的 FCM 能力。
 - 版本名来自 tag；版本码为 `1000 + GITHUB_RUN_NUMBER`。正常发布须按运行顺序完成，不得将旧 tag 重新构建为较新升级版本；工作流更名/计数重置前需迁移版本码基数。
 - 本地未配置 keystore 的 assembleRelease 仅用于编译验证，可能使用 debug 签名，不能作为发布产物。历史 debug 签名安装包无法用新稳定证书直接覆盖，应在目标设备验证迁移并事先保存服务器配置。
 - keystore、口令、Firebase 配置均不得进入仓库。CI 在成功或失败后清理注入文件。
@@ -22,7 +22,7 @@
 
 1. 完成功能和验证，更新 `docs/releases/<tag>.md`。
 2. 提交变更并推送分支。
-3. 创建并推送版本 tag，或手动运行 `发布 OpenCode Mobile Release` 工作流。
+3. 创建并推送版本 tag，或手动运行 `发布 OpenCode Lagoon Release` 工作流。
 4. 工作流重新执行 Android 单元测试、Release APK 构建和 companion 测试。
 5. 工作流把中文说明和 APK 一起发布到 GitHub Release。tag 触发默认是 pre-release；手动运行时只有选择 `release` 才会发布正式版。
 
@@ -30,8 +30,8 @@
 
 - GitHub Release 的正文由工作流自动组装，顺序为：版本标题、发布类型说明、推送变体、`## 本次更新`、`## 下载`、`## 自动验证`。
 - `## 本次更新` 的正文取自 `docs/releases/<tag>.md`（去掉文件开头的 `## 本次更新` 标题）。
-- `## 下载` 由工作流生成，包含 Android 安装包的直链：`https://github.com/<owner>/<repo>/releases/download/<tag>/OpenCode-Mobile-<version>.apk`。
-- Android 安装包的上传文件名固定为 `OpenCode-Mobile-<version>.apk`（`<version>` 为去掉 `v` 前缀的 tag，例如 `v0.1.0-rc.5` → `OpenCode-Mobile-0.1.0-rc.5.apk`），不再是固定的 `app-release.apk`。Gradle 仍按默认路径产出 `app-release.apk`，工作流在校验签名后复制并重命名后上传。
+- `## 下载` 由工作流生成，包含 Android 安装包的直链：`https://github.com/<owner>/<repo>/releases/download/<tag>/OpenCode-Lagoon-<version>.apk`。
+- Android 安装包的上传文件名固定为 `OpenCode-Lagoon-<version>.apk`（`<version>` 为去掉 `v` 前缀的 tag，例如 `v0.1.0-rc.5` → `OpenCode-Lagoon-0.1.0-rc.5.apk`），不再是固定的 `app-release.apk`。Gradle 仍按默认路径产出 `app-release.apk`，工作流在校验签名后复制并重命名后上传。
 - 因为直链里写死了文件名和 tag，改名或改版本号会破坏旧链接；如需变更命名规则，应作为独立迁移处理。
 
 ## 说明模板

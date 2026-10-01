@@ -214,7 +214,7 @@ export function createCompanion({ pluginSecret, pushSecret, registryFile, verify
         return reply(res, 200, remove ? { unregistered: true } : { registered: true })
       }
       if (req.method === 'POST' && path === '/v1/events') {
-        if (!safeEqual(req.headers['x-opencode-mobile-secret'], pluginSecret)) return reply(res, 401, { error: 'unauthorized' })
+        if (!safeEqual(req.headers['x-opencode-lagoon-secret'], pluginSecret)) return reply(res, 401, { error: 'unauthorized' })
         const event = await body(req)
         if (event.producerId != null && (!nonempty(event.producerId, 256) || !Number.isSafeInteger(event.sequence) || event.sequence <= 0)) return reply(res, 400, { error: 'invalid producer sequence' })
         if (!nonempty(event.sessionId, 256) || !nonempty(event.type, 128) || !nonempty(event.serverKey) ||
@@ -277,16 +277,16 @@ export function createCompanion({ pluginSecret, pushSecret, registryFile, verify
 
 export async function start() {
   const opencodeUrl = process.env.OPENCODE_URL || 'http://127.0.0.1:4096'
-  const pluginSecret = process.env.OPENCODE_MOBILE_PLUGIN_SECRET
-  const pushSecret = process.env.OPENCODE_MOBILE_PUSH_SECRET
+  const pluginSecret = process.env.OPENCODE_LAGOON_PLUGIN_SECRET
+  const pushSecret = process.env.OPENCODE_LAGOON_PUSH_SECRET
   const opencodePassword = process.env.OPENCODE_SERVER_PASSWORD
   const opencodeUsername = process.env.OPENCODE_SERVER_USERNAME || 'opencode'
-  if (!pluginSecret || !opencodePassword) throw new Error('OPENCODE_MOBILE_PLUGIN_SECRET and OPENCODE_SERVER_PASSWORD are required')
+  if (!pluginSecret || !opencodePassword) throw new Error('OPENCODE_LAGOON_PLUGIN_SECRET and OPENCODE_SERVER_PASSWORD are required')
   const credentials = 'Basic ' + Buffer.from(`${opencodeUsername}:${opencodePassword}`).toString('base64')
   const url = new URL(opencodeUrl)
   if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) throw new Error('OPENCODE_URL must target local OpenCode server')
-  const rawServerKey = process.env.OPENCODE_MOBILE_SERVER_KEY?.trim()
-  if (!rawServerKey) throw new Error('OPENCODE_MOBILE_SERVER_KEY is required and must equal the App server URL')
+  const rawServerKey = process.env.OPENCODE_LAGOON_SERVER_KEY?.trim()
+  if (!rawServerKey) throw new Error('OPENCODE_LAGOON_SERVER_KEY is required and must equal the App server URL')
   const configuredServerKey = rawServerKey.replace(/\/+$/, '')
   const protectedProbe = async headers => {
     const legacy = await fetch(new URL('/session?limit=1', opencodeUrl), { headers, signal: AbortSignal.timeout(3000), redirect: 'error' })
@@ -299,7 +299,7 @@ export async function start() {
   const { initializeApp, applicationDefault } = await import('firebase-admin/app')
   const { getMessaging } = await import('firebase-admin/messaging')
   initializeApp({ credential: applicationDefault(), projectId: process.env.FIREBASE_PROJECT_ID })
-  const registryFile = process.env.REGISTRY_FILE || join(homedir(), '.local/state/opencode-mobile/devices.json')
+  const registryFile = process.env.REGISTRY_FILE || join(homedir(), '.local/state/opencode-lagoon/devices.json')
   const companion = createCompanion({
     opencodeUrl, pluginSecret, pushSecret, registryFile, serverKey: configuredServerKey,
     verifyDevice: async (auth, cookie) => {

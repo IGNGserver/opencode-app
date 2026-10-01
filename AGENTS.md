@@ -1,4 +1,4 @@
-# OpenCode Mobile repository
+# OpenCode Lagoon repository
 
 Collaboration: collaborative
 Validation: `ANDROID_HOME=/home/lvziw/Android/Sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` and `cd companion && node --test`

@@ -1,8 +1,8 @@
 # 灵动岛（实时活动）适配矩阵
 
-本文件记录 OpenCode Mobile 的灵动岛 / 实时通知在各手机品牌上的接入方式、代码位置与验收状态。
-所有通道共用同一份任务计数口径（`app/src/main/java/com/igng/opencode/mobile/core/TaskSummary.kt`）：
-`运行中 / 未读已完成 / 待回复 / 失败`，由 `MobileController` 派生后统一发布一条 ongoing 通知。
+本文件记录 OpenCode Lagoon 的灵动岛 / 实时通知在各手机品牌上的接入方式、代码位置与验收状态。
+所有通道共用同一份任务计数口径（`app/src/main/java/com/igng/opencode/lagoon/core/TaskSummary.kt`）：
+`运行中 / 未读已完成 / 待回复 / 失败`，由 `LagoonController` 派生后统一发布一条 ongoing 通知。
 
 ## 通道矩阵
 
@@ -68,7 +68,7 @@
 配置 companion + FCM 后，即使 App 进程被系统杀死，任务计数仍可继续更新：
 
 - companion 仍按每会话事件下发 v3 推送（协议与签名不变，无需插件改动）。
-- `MobileMessagingService` 收到推送后，把该会话的最新阶段写入持久映射（`ServerStore` 的
+- `LagoonMessagingService` 收到推送后，把该会话的最新阶段写入持久映射（`ServerStore` 的
   `pushPhase:<server>:<session>`），并据此重建全服务器计数、刷新总览通知。
 - 因此后台总览会随每一个新的会话事件而更新；计数口径与前台一致（未读已完成 / 待回复 / 失败）。
 - 已读状态同样持久化（`taskRead:<server>:<session>`），会话再次进入终态时清除，保证“新的完成 = 重新未读”。
