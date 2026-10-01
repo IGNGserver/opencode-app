@@ -164,6 +164,42 @@ class BoundaryRegressionTest {
     val p=store.profiles().single()
     assertFalse(p.islandHonor);assertFalse(p.islandOppoFluidCloud)
   }
+  @Test fun backgroundPhasesTrackCountsAndExpireTerminalStates() {
+    val store=store();val now=System.currentTimeMillis()
+    store.recordPushPhase("srv","run", TaskPhase.THINKING.name, now)
+    store.recordPushPhase("srv","done", TaskPhase.COMPLETED.name, now)
+    store.recordPushPhase("srv","ask", TaskPhase.WAITING_QUESTION.name, now)
+    store.recordPushPhase("srv","boom", TaskPhase.FAILED.name, now)
+    assertEquals(TaskSummary(running=1, completed=1, waiting=1, failed=1), TaskSummary.fromPhaseNames(store.pushPhases("srv")))
+    // A read terminal result stops counting; a different server's phases are isolated.
+    store.acknowledgeTask("srv","done");store.acknowledgeTask("srv","boom")
+    assertEquals(TaskSummary(running=1, completed=0, waiting=1, failed=0),
+      TaskSummary.fromPhaseNames(store.pushPhases("srv"), store.acknowledgedTasks("srv")))
+    assertEquals(TaskSummary.EMPTY, TaskSummary.fromPhaseNames(store.pushPhases("other")))
+  }
+  @Test fun reCompletionMakesAReadResultUnreadAgain() {
+    val store=store();val now=System.currentTimeMillis()
+    store.recordPushPhase("srv","s", TaskPhase.THINKING.name, now)
+    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now)
+    store.acknowledgeTask("srv","s")
+    assertTrue(store.acknowledgedTasks("srv").contains("s"))
+    // A new run that reaches a terminal state again must be counted as unread.
+    store.recordPushPhase("srv","s", TaskPhase.THINKING.name, now + 1)
+    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now + 2)
+    assertFalse(store.acknowledgedTasks("srv").contains("s"))
+  }
+  @Test fun terminalTransitionFromIdleKeepsReadFlag() {
+    val store=store();val now=System.currentTimeMillis()
+    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now)
+    store.acknowledgeTask("srv","s")
+    // Re-reporting the same terminal phase (a duplicate push) must not resurrect an unread count.
+    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now + 1)
+    assertTrue(store.acknowledgedTasks("srv").contains("s"))
+  }
+  @Test fun fromPhaseNamesIgnoresUnknownPhases() {
+    val summary = TaskSummary.fromPhaseNames(mapOf("a" to "THINKING", "b" to "COMPLETED", "c" to "NOT_A_PHASE", "d" to ""))
+    assertEquals(TaskSummary(running=1, completed=1), summary)
+  }
   @Test fun repeatedCursorFailsInsteadOfReturningPartialAuthoritativeData()=runBlocking {
     MockWebServer().use { s ->
       val api=currentApi(s);repeat(2){s.enqueue(MockResponse().setBody("""{"data":[],"cursor":{"next":"same"}}"""))}

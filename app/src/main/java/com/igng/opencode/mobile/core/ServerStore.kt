@@ -44,7 +44,45 @@ class ServerStore internal constructor(private val preferences: SharedPreference
       .keys.forEach(editor::remove)
     editor.commit()
   }
-  private companion object { val pushLock = Any() }
+  private companion object {
+    val pushLock = Any()
+    private val TERMINAL_PUSH_PHASES = setOf("COMPLETED", "FAILED")
+  }
+
+  /**
+   * Records the latest phase seen for a session from a background push, so the island summary can be
+   * rebuilt after the App process is killed. A fresh terminal state clears its read flag so the new
+   * result counts as unread again. Terminal phases expire after the same window as pushes.
+   */
+  fun recordPushPhase(id: String, session: String, phase: String, timestamp: Long): Boolean = synchronized(pushLock) {
+    val name = "pushPhase:$id:$session"
+    val previous = preferences.getString(name, "").orEmpty().substringBeforeLast(':')
+    val editor = preferences.edit().putString(name, "$phase:$timestamp")
+    if (phase in TERMINAL_PUSH_PHASES && previous !in TERMINAL_PUSH_PHASES) editor.remove("taskRead:$id:$session")
+    val cutoff = timestamp - 86_400_000L
+    preferences.all.filter { (k, v) -> k.startsWith("pushPhase:$id:") && k != name &&
+      (v as? String)?.substringAfterLast(':')?.toLongOrNull()?.let { it < cutoff } == true }
+      .keys.forEach(editor::remove)
+    editor.commit()
+  }
+
+  /** Latest background-observed phases for one server, as session id to phase name. */
+  fun pushPhases(id: String): Map<String, String> =
+    preferences.all.filter { (k, _) -> k.startsWith("pushPhase:$id:") }
+      .mapKeys { (k, _) -> k.removePrefix("pushPhase:$id:") }
+      .mapValues { (_, v) -> (v as? String)?.substringBeforeLast(':').orEmpty() }
+      .filterValues { it.isNotBlank() }
+
+  /**
+   * Sessions whose terminal result the user has already opened. Persisted per server so the island
+   * summary stays unread-aware even after the App is killed and rebuilt from background pushes.
+   */
+  fun acknowledgedTasks(id: String): Set<String> =
+    preferences.all.keys.filter { it.startsWith("taskRead:$id:") }.map { it.removePrefix("taskRead:$id:") }.toSet()
+
+  fun acknowledgeTask(id: String, session: String) {
+    preferences.edit().putString("taskRead:$id:$session", "1").apply()
+  }
 
   fun selectedId(): String? = preferences.getString("selected", null)
   fun selectedProject(): String? = preferences.getString("selectedProject", null)
