@@ -73,3 +73,5 @@ gh secret list --repo IGNGserver/opencode-lagoon
 ## 已发布 APK 的签名迁移
 
 `v0.1.0-rc.1`、`v0.1.0-rc.2`、`v0.1.0-rc.3` 的 APK 都由不同的临时 debug 证书签名，无法从 APK 还原对应私钥。新固定证书从之后的 release 开始使用；设备若已安装上述旧 APK，需要先保存服务器地址等本地配置，再卸载旧包并安装新包。完成这一次迁移后，后续 release 可用同一证书直接更新。
+
+更名为 OpenCode Lagoon 后 `applicationId` 改为 `com.igng.opencode.lagoon`，与已安装的 `com.igng.opencode.mobile` 在系统内并存为两个应用，旧包不会被新包覆盖升级；两者用同一张签名证书。旧包确认不再需要更新后，可直接在设备上卸载，服务器端无需额外清理（companion 的 registry 按 App 上报的设备 ID 记录，旧设备条目可在下次发布说明里提示用户重新注册）。
