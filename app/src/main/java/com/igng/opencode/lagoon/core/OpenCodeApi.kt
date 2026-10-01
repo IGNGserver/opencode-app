@@ -277,8 +277,14 @@ class OpenCodeApi(
       if (!legacy.optBoolean("healthy")) throw IOException("OpenCode 服务未就绪")
       protocol = ServerProtocol.V1
       return legacy.str("version")
-    } catch (error: ApiException) {
-      if (error.status != 404) throw error
+    } catch (error: Exception) {
+      // If legacy /global/health returned 404 OR returned non-JSON/SPA HTML with HTTP 200,
+      // it means the server is likely an OpenCode V2 instance (where /global/health does not exist,
+      // or unknown routes are served with SPA HTML fallback by the web server).
+      val isHtmlOrNotJson = error is IOException && error !is ApiException &&
+        (error.message?.contains("网页") == true || error.message?.contains("JSON") == true)
+      val is404 = error is ApiException && error.status == 404
+      if (!is404 && !isHtmlOrNotJson) throw error
     }
     val version = v2Health()
     protocol = ServerProtocol.V2

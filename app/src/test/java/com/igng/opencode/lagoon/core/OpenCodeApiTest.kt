@@ -305,6 +305,24 @@ class OpenCodeApiTest {
     }
   }
 
+  /**
+   * When an OpenCode V2 server hosts a web frontend, unknown non-API routes return HTTP 200 with SPA
+   * HTML. If /global/health returns HTML, the probe must gracefully fall through to V2 without failing.
+   */
+  @Test fun detectsV2WhenLegacyPathReturnsSpaHtml() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html")) // global/health
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health
+      server.enqueue(MockResponse().setBody("""{"version":"2.0.18"}""")) // api/info
+      val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
+      assertEquals("OpenCode V2", api.health())
+      assertEquals(ServerProtocol.V2, api.detectedProtocol())
+      assertEquals("/global/health", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals("/api/health", server.takeRequest().requestUrl?.encodedPath)
+      assertEquals("/api/info", server.takeRequest().requestUrl?.encodedPath)
+    }
+  }
+
   /** V2 unrevert falls back to the current DELETE .../revert when revert/clear is absent. */
   @Test fun v2UnrevertFallsBackToDeleteRevert() = runBlocking {
     MockWebServer().use { server ->
@@ -373,9 +391,15 @@ class OpenCodeApiTest {
    */
   @Test fun nonJsonSuccessResponsesReportFriendlyErrors() = runBlocking {
     MockWebServer().use { server ->
-      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html"))
-      server.enqueue(MockResponse().setBody("OK"))
-      server.enqueue(MockResponse().setResponseCode(200))
+      server.enqueue(MockResponse().setResponseCode(404)) // global/health (V1 fallback)
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health (older V2)
+      server.enqueue(MockResponse().setBody("<!DOCTYPE html><html><body>OpenCode</body></html>").addHeader("Content-Type", "text/html")) // api/info
+      server.enqueue(MockResponse().setResponseCode(404)) // global/health
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health
+      server.enqueue(MockResponse().setBody("OK")) // api/info
+      server.enqueue(MockResponse().setResponseCode(404)) // global/health
+      server.enqueue(MockResponse().setResponseCode(404)) // api/health
+      server.enqueue(MockResponse().setResponseCode(200)) // api/info
       suspend fun healthError(): Throwable? = OpenCodeApi(
         ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret"
       ).let { api -> runCatching { api.health() }.exceptionOrNull() }
