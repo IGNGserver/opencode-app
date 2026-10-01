@@ -128,7 +128,8 @@ class MobileController private constructor(private val context: Context) {
     val client = api ?: return
     val version = client.health()
     val projects = client.projects()
-    val sessionResults = projects.map { project -> runCatching { client.sessions(project.directory) } }
+    // 归属由 projectID 关联；按项目拉取会话时带上 projectId，V2 用 ?project= 精确过滤。
+    val sessionResults = projects.map { project -> runCatching { client.sessions(project.directory, project.id) } }
     if (sessionResults.isNotEmpty() && sessionResults.all { it.isFailure }) throw sessionResults.first().exceptionOrNull()!!
     val sessions = sessionResults.flatMap { it.getOrDefault(emptyList()) }.distinctBy { it.id }.sortedByDescending { it.updated }
     val statuses = projects.flatMap { project -> runCatching { client.status(project.directory).entries }.getOrDefault(emptySet()) }.associate { it.key to it.value }
@@ -200,12 +201,13 @@ class MobileController private constructor(private val context: Context) {
     }
     when (event.type) {
       "permission.asked" -> {
-        val request = props.toPermission(directory)
+        // 事件属性已归一为 V1 形状（见 toServerEvent），用 V1 契约解析
+        val request = V1Contract.permission(props, directory)
         mutable.update { it.copy(permissions = (it.permissions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
       "question.asked" -> {
-        val request = props.toQuestion(directory)
+        val request = V1Contract.question(props, directory)
         mutable.update { it.copy(questions = (it.questions.filterNot { old -> old.id == request.id } + request)) }
         notifyAttention(request.sessionId)
       }
@@ -218,6 +220,12 @@ class MobileController private constructor(private val context: Context) {
         mutable.update { it.copy(questions = it.questions.filterNot { old -> old.id == requestId }) }
       }
     }
+    // 标题/归属正确性：对 session.created/updated 做**单条 reconcile**（官方 sync.tsx 语义），
+    // 直接用事件里的 info 更新该会话，避免整表 reload 覆盖导致标题"找错"。
+    if (event.type in setOf("session.created", "session.updated")) {
+      val info = props.obj("info").takeIf { it.length() > 0 } ?: props
+      reconcileSession(info)
+    }
     if (event.type in setOf("session.created", "session.updated", "session.deleted", "session.idle", "session.error", "permission.asked", "question.asked", "permission.replied", "permission.rejected", "question.replied", "question.rejected")) {
       eventRefresh?.cancel()
       eventRefresh = scope.launch { delay(350); if (generation > 0) reload() }
@@ -227,6 +235,22 @@ class MobileController private constructor(private val context: Context) {
       messageRefresh = scope.launch { delay(350); loadSession(session, ancillary = false) }
     }
   }
+  /** 用事件里的会话 info 单条更新列表（标题/更新时间/归属），不整表覆盖。 */
+  private fun reconcileSession(info: JSONObject) {
+    if (info.length() == 0) return
+    val parsed = when (api?.detectedProtocol()) {
+      ServerProtocol.V2 -> V2Contract.session(info)
+      else -> V1Contract.session(info)
+    }
+    if (parsed.id.isBlank()) return
+    mutable.update { state ->
+      val exists = state.sessions.any { it.id == parsed.id }
+      val merged = if (exists) state.sessions.map { if (it.id == parsed.id) parsed else it }
+      else listOf(parsed) + state.sessions
+      state.copy(sessions = merged.sortedByDescending { it.updated })
+    }
+  }
+
   private fun notifyAttention(sessionId: String) {
     val current = mutable.value
     val profile = current.server ?: return
@@ -252,7 +276,9 @@ class MobileController private constructor(private val context: Context) {
   }
   fun selectSession(id: String) {
     val session = mutable.value.sessions.firstOrNull { it.id == id } ?: return
-    val project = mutable.value.projects.firstOrNull { it.directory == session.directory }
+    // 归属判定用 projectID 关联（V1/V2 都有 projectID），严禁用 directory 字符串匹配反推。
+    val project = mutable.value.projects.firstOrNull { it.id == session.projectId }
+      ?: mutable.value.projects.firstOrNull { it.directory == session.directory }
     val offline = mutable.value.cached && !mutable.value.connected
     val messages = if (offline) mutable.value.serverId?.let { cache.messages(it, id) }.orEmpty() else emptyList()
     mutable.update { it.copy(projectId = project?.id ?: it.projectId, sessionId = id, messages = messages,

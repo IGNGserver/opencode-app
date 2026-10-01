@@ -36,17 +36,17 @@ class OfflineCache(context: Context) {
     String(cipher.doFinal(payload.copyOfRange(12, payload.size)), Charsets.UTF_8)
   } catch (_: Exception) { null }
   fun saveCatalog(serverId: String, projects: List<Project>, sessions: List<Session>) {
-    val data = JSONObject().put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
+    val data = JSONObject().put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name).put("timeUpdated", it.timeUpdated)) } })
       .put("sessions", JSONArray().apply { sessions.take(300).forEach { put(JSONObject().put("id", it.id).put("directory", it.directory)
-        .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId)) } })
+        .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId).put("projectId", it.projectId).put("titleIsDefault", it.titleIsDefault)) } })
     write("catalog:$serverId", data.toString())
   }
   fun catalog(serverId: String): Pair<List<Project>, List<Session>>? {
     val raw = read("catalog:$serverId") ?: return null
     return try {
     val data = JSONObject(raw)
-    data.arr("projects").objects().map { Project(it.str("id"), it.str("directory"), it.str("name")) } to
-      data.arr("sessions").objects().map { Session(it.str("id"), it.str("directory"), it.str("title"), it.optLong("updated"), it.str("parentId").ifBlank { null }) }
+    data.arr("projects").objects().map { Project(it.str("id"), it.str("directory"), it.str("name"), it.optLong("timeUpdated")) } to
+      data.arr("sessions").objects().map { Session(it.str("id"), it.str("directory"), it.str("title"), it.optLong("updated"), it.str("parentId").ifBlank { null }, it.str("projectId"), it.optBoolean("titleIsDefault")) }
   } catch (_: Exception) { null }
   }
   fun saveMessages(serverId: String, sessionId: String, messages: List<Message>) {

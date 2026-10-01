@@ -31,8 +31,22 @@ data class ServerCredentials(
 
 data class ServerEvent(val id: String = "", val directory: String, val type: String, val properties: JSONObject)
 class ApiException(val status: Int, message: String, val responseBody: String = "") : IOException(message)
+
+/**
+ * 服务端 API 代际。两套都完整支持，不做"猜协议"：
+ * [health] 探测确定后，端点与解析严格走对应代际的契约（见 [V1Contract]/[V2Contract]）。
+ */
 enum class ServerProtocol { UNKNOWN, V1, V2 }
 
+/**
+ * OpenCode Server 双协议客户端。
+ *
+ * 设计原则（对应"完全照抄官方客户端逻辑"）：
+ * 1. 端点一一对应官方 SDK 的 `operationId`，不自造路径；
+ * 2. 请求体字段严格按 schema（V2 均 `additionalProperties:false`，字段名错即 400）；
+ * 3. 解析全部委托 [V1Contract]/[V2Contract]，本类不含 JSON 字段名；
+ * 4. 分页遵守 `cursor` 不与 `order` 同用的约束。
+ */
 class OpenCodeApi(private val profile: ServerProfile, private val credentials: ServerCredentials) {
   constructor(profile: ServerProfile, password: String) : this(profile, ServerCredentials(profile.username, password))
 
@@ -53,9 +67,18 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     require(base.username.isEmpty() && base.password.isEmpty() && base.query == null && base.fragment == null) { "请使用不含凭据或参数的服务器地址" }
   }
 
+  private fun isV2() = protocol == ServerProtocol.V2
+
+  /**
+   * 构造请求 URL。目录定位参数按代际不同：
+   * V1 用 `?directory=`，V2 用 `?location[directory]=`（官方 SDK 对 `/api/` 前缀路由两者都写）。
+   */
   private fun url(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): HttpUrl {
     val builder = base.newBuilder().addPathSegments(path.trimStart('/'))
-    if (!directory.isNullOrBlank()) builder.addQueryParameter("directory", directory)
+    if (!directory.isNullOrBlank()) {
+      builder.addQueryParameter("directory", directory)
+      if (isV2()) builder.addQueryParameter("location[directory]", directory)
+    }
     query.forEach { (key, value) -> builder.addQueryParameter(key, value) }
     return builder.build()
   }
@@ -117,23 +140,19 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
 
   private suspend fun obj(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONObject = JSONObject(request("GET", path, directory, query))
   private suspend fun arr(path: String, directory: String? = null, query: Map<String, String> = emptyMap()): JSONArray = JSONArray(request("GET", path, directory, query))
-  private fun dataObject(value: JSONObject): JSONObject = value.optJSONObject("data") ?: value
   private fun dataArray(value: JSONObject): JSONArray = value.optJSONArray("data") ?: JSONArray()
-  private suspend fun dataObjects(
-    path: String,
-    query: Map<String, String> = emptyMap(),
-    dropAfterFirst: Set<String> = emptySet()
-  ): List<JSONObject> {
+
+  /**
+   * 游标分页取全部对象。遵守契约约束：**跟随 cursor 时不再携带 `order` 等首页参数**，
+   * 否则服务端行为未定义（重复/漏项）。返回 `{data, cursor:{next}}` 形状的所有页。
+   */
+  private suspend fun pagedObjects(path: String, query: Map<String, String>): List<JSONObject> {
     val result = mutableListOf<JSONObject>()
     val seen = mutableSetOf<String>()
     var cursor: String? = null
     do {
-      val pageQuery = query.toMutableMap().apply {
-        if (cursor != null) {
-          put("cursor", cursor!!)
-          dropAfterFirst.forEach(::remove)
-        }
-      }
+      val pageQuery: Map<String, String> = if (cursor == null) query
+      else mapOf("cursor" to cursor!!)
       val page = obj(path, query = pageQuery)
       result += page.optJSONArray("data")?.objects().orEmpty()
       val next = page.obj("cursor").str("next").takeIf { it.isNotBlank() }
@@ -141,6 +160,7 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     } while (cursor != null)
     return result
   }
+
   private fun segment(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
   private fun locationQuery(directory: String): Map<String, String> = mapOf("location[directory]" to directory)
   fun detectedProtocol(): ServerProtocol = protocol
@@ -150,6 +170,7 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     return protocol
   }
 
+  /* ============ 健康探测 ============ */
   suspend fun health(): String {
     if (protocol == ServerProtocol.V1) {
       val response = obj("global/health")
@@ -174,60 +195,84 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     protocol = ServerProtocol.V2
     return "OpenCode V2"
   }
+
+  /* ============ 项目 ============ */
+  // V1: GET /project → Project[]；V2: GET /api/project → Project[]（**不是** /api/location）
   suspend fun projects(): List<Project> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("project").objects().map { it.toProject() }.filter { it.directory.isNotBlank() }
+    ServerProtocol.V1 -> arr("project").objects().map(V1Contract::project).filter { it.directory.isNotBlank() }
+    ServerProtocol.V2 -> arr("api/project").objects().map(V2Contract::project).filter { it.directory.isNotBlank() }
+    ServerProtocol.UNKNOWN -> emptyList()
+  }
+
+  /* ============ 会话 ============ */
+  // 归属由 projectID 关联；此处按目录拉取，调用方按 projectId 分组。
+  suspend fun sessions(directory: String, projectId: String = ""): List<Session> = when (ensureProtocol()) {
+    ServerProtocol.V1 -> arr("session", directory).objects().map(V1Contract::session)
     ServerProtocol.V2 -> {
-      val location = dataObject(obj("api/location"))
-      val directory = location.str("directory")
-      if (directory.isBlank()) emptyList()
-      else listOf(Project(location.obj("project").str("id").ifBlank { directory }, directory, directory.substringAfterLast('/')))
+      val query = if (projectId.isNotBlank()) mapOf("project" to projectId, "order" to "desc", "limit" to "200")
+      else mapOf("directory" to directory, "order" to "desc", "limit" to "200")
+      pagedObjects("api/session", query).map(V2Contract::session)
     }
     ServerProtocol.UNKNOWN -> emptyList()
   }
-  suspend fun sessions(directory: String): List<Session> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("session", directory).objects().map { it.toSession() }
-    ServerProtocol.V2 -> dataObjects("api/session", query = mapOf("directory" to directory, "order" to "desc")).map { it.toSession() }
-    ServerProtocol.UNKNOWN -> emptyList()
-  }
+
   suspend fun status(directory: String): Map<String, String> {
     return when (ensureProtocol()) {
       ServerProtocol.V1 -> {
         val json = obj("session/status", directory)
         json.keys().asSequence().associateWith { json.optJSONObject(it)?.str("type") ?: "idle" }
       }
-      ServerProtocol.V2 -> dataObject(obj("api/session/active")).keys().asSequence().associateWith { "running" }
+      // V2: GET /api/session/active → { data: { sessionID: {type:"running"} } }
+      ServerProtocol.V2 -> {
+        val json = obj("api/session/active")
+        val active = json.optJSONObject("data") ?: json
+        active.keys().asSequence().associateWith { "running" }
+      }
       ServerProtocol.UNKNOWN -> emptyMap()
     }
   }
+
+  /* ============ 消息 ============ */
+  // V1: GET /session/{id}/message → WithParts[]（{info,parts}）
+  // V2: GET /api/session/{id}/message → {data: Session.Message.Info[], cursor}
   suspend fun messages(sessionId: String, directory: String): List<Message> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("session/${segment(sessionId)}/message", directory).objects().map { it.toMessage() }
-    ServerProtocol.V2 -> dataObjects("api/session/${segment(sessionId)}/message", query = mapOf("order" to "asc"), dropAfterFirst = setOf("order")).map { it.toMessage() }
+    ServerProtocol.V1 -> arr("session/${segment(sessionId)}/message", directory).objects().map(V1Contract::message)
+    ServerProtocol.V2 -> pagedObjects("api/session/${segment(sessionId)}/message", mapOf("order" to "asc", "limit" to "200"))
+      .map(V2Contract::message).sortedBy { it.created }
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
+  /* ============ 会话写操作 ============ */
   suspend fun createSession(directory: String, title: String): Session = when (ensureProtocol()) {
-    ServerProtocol.V1 -> JSONObject(request("POST", "session", directory, body = JSONObject().put("title", title))).toSession()
-    ServerProtocol.V2 -> dataObject(requestObject("POST", "api/session", body = JSONObject().put("location", JSONObject().put("directory", directory)))).toSession()
+    ServerProtocol.V1 -> JSONObject(request("POST", "session", directory, body = JSONObject().put("title", title))).let(V1Contract::session)
+    ServerProtocol.V2 -> JSONObject(request("POST", "api/session", body = JSONObject()
+      .put("title", title)
+      .put("location", JSONObject().put("directory", directory)))).let(V2Contract::session)
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }
+
   suspend fun renameSession(session: Session, title: String) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("PATCH", "session/${segment(session.id)}", session.directory, body = JSONObject().put("title", title))
-      ServerProtocol.V2 -> unsupported("OpenCode V2 当前没有会话重命名接口")
+      ServerProtocol.V2 -> request("PATCH", "api/session/${segment(session.id)}", body = JSONObject().put("title", title))
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun deleteSession(session: Session) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("DELETE", "session/${segment(session.id)}", session.directory)
-      ServerProtocol.V2 -> unsupported("OpenCode V2 当前没有会话删除接口")
+      ServerProtocol.V2 -> request("DELETE", "api/session/${segment(session.id)}")
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun forkSession(session: Session): Session = when (ensureProtocol()) {
-    ServerProtocol.V1 -> JSONObject(request("POST", "session/${segment(session.id)}/fork", session.directory)).toSession()
-    ServerProtocol.V2 -> unsupported("OpenCode V2 当前没有会话 Fork 接口")
+    ServerProtocol.V1 -> JSONObject(request("POST", "session/${segment(session.id)}/fork", session.directory)).let(V1Contract::session)
+    ServerProtocol.V2 -> JSONObject(request("POST", "api/session/${segment(session.id)}/fork")).let(V2Contract::session)
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }
+
   suspend fun abort(session: Session) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "session/${segment(session.id)}/abort", session.directory)
@@ -235,15 +280,18 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun share(session: Session): String {
-    if (ensureProtocol() == ServerProtocol.V2) unsupported("OpenCode V2 当前没有分享接口")
+    if (ensureProtocol() == ServerProtocol.V2) unsupported("OpenCode V2 无分享接口")
     val response = JSONObject(request("POST", "session/${segment(session.id)}/share", session.directory))
     return response.obj("share").str("url").ifBlank { response.str("share") }.ifBlank { response.str("url") }
   }
+
   suspend fun unshare(session: Session) {
-    if (ensureProtocol() == ServerProtocol.V2) unsupported("OpenCode V2 当前没有取消分享接口")
+    if (ensureProtocol() == ServerProtocol.V2) unsupported("OpenCode V2 无取消分享接口")
     request("DELETE", "session/${segment(session.id)}/share", session.directory)
   }
+
   suspend fun summarize(session: Session, model: ModelChoice?) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> {
@@ -255,6 +303,7 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun revert(session: Session, messageId: String) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "session/${segment(session.id)}/revert", session.directory, body = JSONObject().put("messageID", messageId))
@@ -262,13 +311,17 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun unrevert(session: Session) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "session/${segment(session.id)}/unrevert", session.directory)
-      ServerProtocol.V2 -> request("POST", "api/session/${segment(session.id)}/revert/clear")
+      ServerProtocol.V2 -> request("DELETE", "api/session/${segment(session.id)}/revert")
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
+  /* ============ 发消息 ============ */
+  // V2 契约：`text` 是**顶层必填**字段（不是 {"prompt":{"text"}}），schema additionalProperties:false。
   suspend fun send(session: Session, text: String, agent: String?, model: ModelChoice?) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> {
@@ -280,11 +333,12 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
       ServerProtocol.V2 -> {
         if (!agent.isNullOrBlank()) request("POST", "api/session/${segment(session.id)}/agent", body = JSONObject().put("agent", agent))
         if (model != null) request("POST", "api/session/${segment(session.id)}/model", body = JSONObject().put("model", JSONObject().put("providerID", model.providerId).put("id", model.modelId)))
-        request("POST", "api/session/${segment(session.id)}/prompt", body = JSONObject().put("prompt", JSONObject().put("text", text)))
+        request("POST", "api/session/${segment(session.id)}/prompt", body = JSONObject().put("text", text))
       }
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun command(session: Session, name: String, arguments: String, agent: String?, model: ModelChoice?) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> {
@@ -297,16 +351,21 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
+  /* ============ Agent / Command / Model ============ */
   suspend fun agents(directory: String): List<AgentChoice> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("agent", directory).objects().map { AgentChoice(it.str("name"), it.str("description")) }
-    ServerProtocol.V2 -> dataArray(obj("api/agent", query = locationQuery(directory))).objects().filterNot { it.optBoolean("hidden") }.map { AgentChoice(it.str("id"), it.str("description")) }
+    ServerProtocol.V2 -> dataArray(obj("api/agent", query = locationQuery(directory))).objects()
+      .filterNot { it.optBoolean("hidden") }.map { AgentChoice(it.str("name").ifBlank { it.str("id") }, it.str("description")) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
   suspend fun commands(directory: String): List<CommandChoice> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("command", directory).objects().map { CommandChoice(it.str("name"), it.str("description")) }
     ServerProtocol.V2 -> dataArray(obj("api/command", query = locationQuery(directory))).objects().map { CommandChoice(it.str("name"), it.str("description")) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
   suspend fun models(directory: String): List<ModelChoice> {
     return when (ensureProtocol()) {
       ServerProtocol.V1 -> {
@@ -326,74 +385,108 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
       ServerProtocol.UNKNOWN -> emptyList()
     }
   }
+
+  /* ============ 权限 / 问题 ============ */
+  // V1 无权限/问题的 REST 列表端点（官方 SDK 端点表已核对）——仅事件推送，故列表返回空、实时靠 SSE。
+  // V2: GET /api/permission/request；问题在 V2 已改为 `form`（/api/form）。
   suspend fun permissions(directory: String): List<PermissionRequest> = try {
     when (ensureProtocol()) {
-      ServerProtocol.V1 -> arr("permission", directory).objects().map { it.toPermission(directory) }
-      ServerProtocol.V2 -> dataArray(obj("api/permission/request", query = locationQuery(directory))).objects().map { it.toPermission(directory) }
+      ServerProtocol.V1 -> emptyList()
+      ServerProtocol.V2 -> dataArray(obj("api/permission/request", query = locationQuery(directory))).objects().map { V2Contract.permission(it, directory) }
       ServerProtocol.UNKNOWN -> emptyList()
     }
   } catch (e: ApiException) { if (e.status == 404) emptyList() else throw e }
+
   suspend fun questions(directory: String): List<QuestionRequest> = try {
     when (ensureProtocol()) {
-      ServerProtocol.V1 -> arr("question", directory).objects().map { it.toQuestion(directory) }
-      ServerProtocol.V2 -> dataArray(obj("api/question/request", query = locationQuery(directory))).objects().map { it.toQuestion(directory) }
+      ServerProtocol.V1 -> emptyList()   // V1 无 REST 列表端点，实时靠 SSE `question.asked`
+      ServerProtocol.V2 -> dataArray(obj("api/form", query = locationQuery(directory))).objects().map { formToQuestion(it, directory) }
       ServerProtocol.UNKNOWN -> emptyList()
     }
   } catch (e: ApiException) { if (e.status == 404) emptyList() else throw e }
+
+  // V2 `Form.Info` → 统一 QuestionRequest（form 是 V2 的问答形态）
+  private fun formToQuestion(json: JSONObject, directory: String): QuestionRequest {
+    val fields = json.obj("fields").optJSONObject("fields") ?: json.obj("fields")
+    val options = fields.arr("options").objects().map { QuestionOption(it.str("label"), it.str("description")) }
+    return QuestionRequest(
+      id = json.str("id"), sessionId = json.str("sessionID"), directory = directory,
+      questions = listOf(QuestionPrompt(
+        title = json.str("title").ifBlank { fields.str("label") },
+        options = options,
+        multiple = fields.optBoolean("multiple"),
+        header = json.str("title"),
+        custom = fields.str("type") == "string"
+      ))
+    )
+  }
+
+  // V1: POST /session/{id}/permissions/{permissionID}，body {reply, message?}（PermissionV1.ReplyBody）
+  // V2: POST /api/session/{id}/permission/{requestID}/reply，body {decision}（Permission.Reply）
   suspend fun replyPermission(request: PermissionRequest, reply: String) {
     when (ensureProtocol()) {
-      ServerProtocol.V1 -> try {
-        request("POST", "permission/${segment(request.id)}/reply", request.directory, body = JSONObject().put("reply", reply))
-      } catch (e: ApiException) {
-        if (e.status != 404) throw e
-        request("POST", "session/${segment(request.sessionId)}/permissions/${segment(request.id)}", request.directory,
-          body = JSONObject().put("response", reply).put("remember", reply == "always"))
-      }
+      ServerProtocol.V1 -> request("POST", "session/${segment(request.sessionId)}/permissions/${segment(request.id)}", request.directory,
+        body = JSONObject().put("reply", normalizeReply(reply)))
       ServerProtocol.V2 -> request("POST", "api/session/${segment(request.sessionId)}/permission/${segment(request.id)}/reply",
-        body = JSONObject().put("reply", reply.lowercase().let { if (it == "allow") "once" else it }))
+        body = JSONObject().put("decision", normalizeReply(reply)))
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
+  // 契约枚举：once | always | reject
+  private fun normalizeReply(reply: String): String = when (reply.lowercase()) {
+    "allow", "once" -> "once"
+    "always" -> "always"
+    else -> "reject"
+  }
+
   suspend fun replyQuestion(request: QuestionRequest, answers: List<List<String>>) {
     val array = JSONArray()
     answers.forEach { row -> array.put(JSONArray(row)) }
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "question/${segment(request.id)}/reply", request.directory, body = JSONObject().put("answers", array))
-      ServerProtocol.V2 -> request("POST", "api/session/${segment(request.sessionId)}/question/${segment(request.id)}/reply",
+      ServerProtocol.V2 -> request("POST", "api/session/${segment(request.sessionId)}/form/${segment(request.id)}/reply",
         body = JSONObject().put("answers", array))
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
   suspend fun rejectQuestion(request: QuestionRequest) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("POST", "question/${segment(request.id)}/reject", request.directory)
-      ServerProtocol.V2 -> request("POST", "api/session/${segment(request.sessionId)}/question/${segment(request.id)}/reject")
+      ServerProtocol.V2 -> request("DELETE", "api/session/${segment(request.sessionId)}/form/${segment(request.id)}")
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }
+
+  /* ============ 附属数据 ============ */
   suspend fun todos(session: Session): List<TodoItem> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("session/${segment(session.id)}/todo", session.directory).objects().map { it.toTodo() }
-    ServerProtocol.V2 -> emptyList()
+    ServerProtocol.V1 -> arr("session/${segment(session.id)}/todo", session.directory).objects().map(V1Contract::todo)
+    ServerProtocol.V2 -> emptyList()   // V2 todo 走消息内 task 状态，无独立端点
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
   suspend fun children(session: Session): List<Session> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("session/${segment(session.id)}/children", session.directory).objects().map { it.toSession() }
-    ServerProtocol.V2 -> sessions(session.directory).filter { it.parentId == session.id }
+    ServerProtocol.V1 -> arr("session/${segment(session.id)}/children", session.directory).objects().map(V1Contract::session)
+    ServerProtocol.V2 -> sessions(session.directory, session.projectId).filter { it.parentId == session.id }
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
   suspend fun diff(session: Session): List<FileChange> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("session/${segment(session.id)}/diff", session.directory).objects().map { it.toChange() }
-    ServerProtocol.V2 -> emptyList()
+    ServerProtocol.V1 -> arr("session/${segment(session.id)}/diff", session.directory).objects().map(V1Contract::change)
+    ServerProtocol.V2 -> dataArray(obj("api/session/${segment(session.id)}/diff")).objects().map(V1Contract::change)
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
   suspend fun files(directory: String, path: String): List<FileNode> = when (ensureProtocol()) {
-    ServerProtocol.V1 -> arr("file", directory, mapOf("path" to path)).objects().map { it.toNode() }
+    ServerProtocol.V1 -> arr("file", directory, mapOf("path" to path)).objects().map(V1Contract::node)
     ServerProtocol.V2 -> dataArray(obj("api/fs/list", query = locationQuery(directory) + (if (path.isNotBlank()) mapOf("path" to path) else emptyMap())))
       .objects().map { item -> FileNode(item.str("path"), item.str("type"), item.str("path").substringAfterLast('/'), "", false) }
     ServerProtocol.UNKNOWN -> emptyList()
   }
+
   suspend fun fileContent(directory: String, path: String): FileContent = when (ensureProtocol()) {
-    ServerProtocol.V1 -> obj("file/content", directory, mapOf("path" to path)).toFileContent()
+    ServerProtocol.V1 -> obj("file/content", directory, mapOf("path" to path)).let(V1Contract::fileContent)
     ServerProtocol.V2 -> {
       val (bytes, contentType) = requestBytes("GET", "api/fs/read/${path.trimStart('/')}", query = locationQuery(directory))
       val binary = !isTextFile(path, contentType)
@@ -402,6 +495,7 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     }
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }
+
   suspend fun searchFiles(directory: String, query: String): List<String> {
     return when (ensureProtocol()) {
       ServerProtocol.V1 -> {
@@ -414,8 +508,10 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     }
   }
 
+  /* ============ SSE 事件 ============ */
+  // V1: GET /global/event；V2: GET /api/event。事件信封两代不同，统一解析为 ServerEvent。
   fun events(lastEventId: String? = null): Flow<ServerEvent> = callbackFlow {
-    val path = if (protocol == ServerProtocol.V1) "global/event" else "api/event"
+    val path = if (isV2()) "api/event" else "global/event"
     val builder = requestBuilder(path, null, emptyMap()).header("Accept", "text/event-stream")
     if (!lastEventId.isNullOrBlank()) builder.header("Last-Event-ID", lastEventId)
     val request = builder.build()
@@ -432,8 +528,6 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
     })
     awaitClose { source.cancel() }
   }
-
-  private suspend fun requestObject(method: String, path: String, body: JSONObject): JSONObject = JSONObject(request(method, path, body = body))
 
   private fun unsupported(message: String): Nothing = throw ApiException(501, message)
 
@@ -453,28 +547,44 @@ class OpenCodeApi(private val profile: ServerProfile, private val credentials: S
   }
 }
 
+/**
+ * 解析 SSE 事件信封为统一 [ServerEvent]。
+ *
+ * V1 `GET /global/event` 信封：`{directory, workspace, payload:{type, properties}}`。
+ * V2 `GET /api/event` 信封：`{id, event, data}`，`data` 为 JSON 编码的事件对象。
+ * 两代的 `permission.*`/`question.*` 变体（`permission.v2.*`、`form.*`）归一到统一事件名，
+ * 以便 [TaskReducer] 与状态层统一处理。
+ */
 internal fun String.toServerEvent(sseId: String): ServerEvent {
   val json = JSONObject(this)
+  // V1 信封
   val payload = json.optJSONObject("payload")
   if (payload != null) return ServerEvent(sseId, json.str("directory"), payload.str("type"), payload.obj("properties"))
-  val type = json.str("type")
-  val data = json.optJSONObject("data") ?: json.obj("properties")
-  val properties = when (type) {
+
+  // V2 信封：data 字段是 JSON 编码的事件体
+  val data = when {
+    json.has("data") && json.opt("data") is JSONObject -> json.obj("data")
+    json.has("data") && json.str("data").isNotBlank() -> runCatching { JSONObject(json.str("data")) }.getOrElse { json }
+    json.has("type") -> json.optJSONObject("data") ?: json.obj("properties")
+    else -> json.obj("properties")
+  }
+  val rawType = json.str("type").ifBlank { data.str("type") }
+  val properties = when (rawType) {
     "permission.v2.asked" -> JSONObject().apply {
       put("id", data.str("id")); put("sessionID", data.str("sessionID")); put("permission", data.str("action"))
       put("patterns", data.arr("resources")); put("always", data.arr("save")); put("metadata", data.obj("metadata"))
       val source = data.obj("source")
-      if (source.str("type") == "tool") put("tool", JSONObject().put("messageID", source.str("messageID")).put("callID", source.str("callID")))
+      if (source.str("type") == "tool") put("tool", JSONObject().put("messageID", source.str("messageID")).put("callID", source.str("id")))
     }
     else -> data
   }
-  val normalizedType = when (type) {
+  val normalizedType = when (rawType) {
     "permission.v2.asked" -> "permission.asked"
     "permission.v2.replied" -> "permission.replied"
     "question.v2.asked" -> "question.asked"
     "question.v2.replied" -> "question.replied"
     "question.v2.rejected" -> "question.rejected"
-    else -> type
+    else -> rawType
   }
   val directory = json.obj("location").str("directory").ifBlank { json.str("directory") }
   return ServerEvent(json.str("id").ifBlank { sseId }, directory, normalizedType, properties)
