@@ -64,7 +64,7 @@ class OpenCodeApiTest {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setResponseCode(404))
       server.enqueue(MockResponse().setBody("""{"healthy":true}""").addHeader("Content-Type", "application/json"))
-      server.enqueue(MockResponse().setBody("""{"directory":"/repo","project":{"id":"project-1","directory":"/repo"}}"""))
+      server.enqueue(MockResponse().setBody("""[{"id":"project-1","canonical":"/repo","name":"repo","time":{"created":1,"updated":2},"sandboxes":[]}]"""))
       server.enqueue(MockResponse().setBody("""{"data":[{"id":"ses-1","projectID":"project-1","title":"Task","location":{"directory":"/repo"},"time":{"created":1,"updated":2}}],"cursor":{}}"""))
       server.enqueue(MockResponse().setBody("""{"data":{"ses-1":{"type":"running"}}}"""))
       server.enqueue(MockResponse().setBody("""{"data":[
@@ -81,7 +81,7 @@ class OpenCodeApiTest {
       assertEquals("hello", messages[0].parts.single().text)
       assertEquals("done", messages[1].parts.single().text)
       val requests = List(6) { server.takeRequest() }
-      assertEquals("/api/location", requests[2].requestUrl?.encodedPath)
+      assertEquals("/api/project", requests[2].requestUrl?.encodedPath)
       assertEquals("/repo", requests[3].requestUrl?.queryParameter("directory") ?: "")
     }
   }
@@ -138,11 +138,16 @@ class OpenCodeApiTest {
   @Test fun mapsV2AssistantToolAndPairToken() = runBlocking {
     val message = JSONObject("""{
       "id":"msg-2","type":"assistant","time":{"created":4},"content":[
-        {"id":"part-1","type":"tool","name":"bash","state":{"status":"completed","input":{"command":"pwd"},"result":"/repo","outputPaths":["out.txt"]}}
+        {"id":"part-1","type":"tool","name":"bash","state":{"status":"completed","input":{"command":"pwd"},"content":[
+          {"type":"text","text":"/repo"},
+          {"type":"file","uri":"file:///out.txt","mime":"text/plain","name":"out.txt"}
+        ]}}
       ]
     }""").toMessage()
     assertEquals("bash", message.parts.single().tool)
     assertEquals("completed", message.parts.single().status)
+    assertEquals("/repo", message.parts.single().output)           // 工具输出取自 Tool.Content.text
+    assertEquals(listOf("out.txt"), message.parts.single().files)   // Tool.FileContent.name
     val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("opencode:secret".toByteArray())
     val pair = PairLinkResolver.resolve("https://example.test/auth/connect/abc?auth_token=$token")
     assertEquals("https://example.test", pair.serverUrl)
@@ -206,9 +211,10 @@ class OpenCodeApiTest {
     assertEquals("bash", legacy.tool)
     assertEquals("completed", legacy.status)
     assertEquals("跑测试", legacy.title)
-    val v2 = JSONObject("""{"id":"part-2","type":"tool","name":"bash","state":{"status":"running","input":{"command":"pwd"},"result":"/repo"}}""").toV2MessagePart()
+    val v2 = JSONObject("""{"id":"part-2","type":"tool","name":"bash","state":{"status":"completed","input":{"command":"pwd"},"content":[{"type":"text","text":"/repo"}]}}""").toV2MessagePart()
     assertEquals("bash", v2.tool)
-    assertEquals("running", v2.status)
+    assertEquals("completed", v2.status)
+    assertEquals("/repo", v2.output)   // V2 工具输出取自 Tool.Content.text（非 state.output/result）
   }
 
   @Test fun modelsExposeTheFieldsTheUiReads() {

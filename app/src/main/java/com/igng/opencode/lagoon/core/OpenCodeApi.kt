@@ -311,17 +311,14 @@ class OpenCodeApi(
   }
   suspend fun projects(): List<Project> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("project").objects().map { it.toProject() }.filter { it.directory.isNotBlank() }
-    ServerProtocol.V2 -> {
-      val location = dataObject(obj("api/location"))
-      val directory = location.str("directory")
-      if (directory.isBlank()) emptyList()
-      else listOf(Project(location.obj("project").str("id").ifBlank { directory }, directory, directory.substringAfterLast('/')))
-    }
+    // V2 项目列表是 GET /api/project（Project[]，路径字段 canonical），非 /api/location（单个当前 location）。
+    ServerProtocol.V2 -> arr("api/project").objects().map { it.toProject() }.filter { it.directory.isNotBlank() }
     ServerProtocol.UNKNOWN -> emptyList()
   }
   suspend fun sessions(directory: String): List<Session> = when (ensureProtocol()) {
     ServerProtocol.V1 -> arr("session", directory).objects().map { it.toSession() }
-    ServerProtocol.V2 -> dataObjects("api/session", query = mapOf("directory" to directory, "order" to "desc")).map { it.toSession() }
+    // cursor 跟随时须去掉 order（契约约束），否则分页重复/漏项。
+    ServerProtocol.V2 -> dataObjects("api/session", query = mapOf("directory" to directory, "order" to "desc"), dropAfterFirst = setOf("order")).map { it.toSession() }
     ServerProtocol.UNKNOWN -> emptyList()
   }
   suspend fun status(directory: String): Map<String, String> {
@@ -342,13 +339,13 @@ class OpenCodeApi(
   }
   suspend fun createSession(directory: String, title: String): Session = when (ensureProtocol()) {
     ServerProtocol.V1 -> jsonObject(request("POST", "session", directory, body = JSONObject().put("title", title))).toSession()
-    ServerProtocol.V2 -> dataObject(requestObject("POST", "api/session", body = JSONObject().put("location", JSONObject().put("directory", directory)))).toSession()
+    ServerProtocol.V2 -> dataObject(requestObject("POST", "api/session", body = JSONObject().put("title", title).put("location", JSONObject().put("directory", directory)))).toSession()
     ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
   }
   suspend fun renameSession(session: Session, title: String) {
     when (ensureProtocol()) {
       ServerProtocol.V1 -> request("PATCH", "session/${segment(session.id)}", session.directory, body = JSONObject().put("title", title))
-      ServerProtocol.V2 -> unsupported("OpenCode V2 当前没有会话重命名接口")
+      ServerProtocol.V2 -> request("PATCH", "api/session/${segment(session.id)}", body = JSONObject().put("title", title))
       ServerProtocol.UNKNOWN -> error("OpenCode 协议未检测")
     }
   }

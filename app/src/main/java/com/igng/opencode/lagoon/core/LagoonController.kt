@@ -478,7 +478,9 @@ class LagoonController private constructor(private val appContext: Context) {
   fun selectSession(id: String) {
     val session = mutable.value.sessions.firstOrNull { it.id == id } ?: return
     selectionRevision += 1
-    val project = mutable.value.projects.firstOrNull { it.directory == session.directory }
+    // 归属判定用 projectID（V1/V2 都有 projectID），避免 directory 字符串匹配因路径规范化差异而错配。
+    val project = mutable.value.projects.firstOrNull { it.id == session.projectId }
+      ?: mutable.value.projects.firstOrNull { it.directory == session.directory }
     val offline = mutable.value.cached && !mutable.value.connected
     val messages = emptyList<Message>()
     // Opening a session reads its result: stop counting it as unread on the island immediately, and
