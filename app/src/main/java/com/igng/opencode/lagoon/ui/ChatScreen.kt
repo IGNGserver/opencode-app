@@ -1,15 +1,20 @@
 package com.igng.opencode.lagoon.ui
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -26,8 +31,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.lagoon.core.*
 import kotlinx.coroutines.launch
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.extra.SuperDialog
@@ -36,8 +39,6 @@ import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
-import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 private enum class DetailTab(val label: String) { CHAT("对话"), TODO("待办"), CHANGES("改动"), FILES("文件"), CHILDREN("子任务") }
 
@@ -171,42 +172,33 @@ fun ChatScreen(
     }
 
     // 主内容面板与底部输入舱
-    val chatBackdrop = rememberLayerBackdrop()
-    CompositionLocalProvider(LocalBackdrop provides chatBackdrop) {
-      Box(Modifier.weight(1f).fillMaxWidth()) {
-        Box(
-          Modifier
-            .fillMaxSize()
-            .layerBackdrop(chatBackdrop)
-        ) {
-          when (tab) {
-            DetailTab.CHAT -> Conversation(
-              state,
-              controller,
-              Modifier.fillMaxSize(),
-              contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp)
-            )
-            DetailTab.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
-            DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
-            DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
-              val key = "${state.serverId}:${state.sessionId}"
-              val current = drafts[key].orEmpty()
-              editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
-              tab = DetailTab.CHAT
-            }, Modifier.fillMaxSize())
-            DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
-          }
-        }
+    Box(Modifier.weight(1f).fillMaxWidth()) {
+      when (tab) {
+        DetailTab.CHAT -> Conversation(
+          state,
+          controller,
+          Modifier.fillMaxSize(),
+          contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp)
+        )
+        DetailTab.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
+        DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
+        DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
+          val key = "${state.serverId}:${state.sessionId}"
+          val current = drafts[key].orEmpty()
+          editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
+          tab = DetailTab.CHAT
+        }, Modifier.fillMaxSize())
+        DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
+      }
 
-        // 底部输入区域仅在 Chat Tab 下展示 (悬浮 Liquid Glass 交互舱)
-        if (tab == DetailTab.CHAT) {
-          Box(
-            modifier = Modifier
-              .align(Alignment.BottomCenter)
-              .fillMaxWidth()
-          ) {
-            MiuixLiquidComposer(state, controller, drafts, backdrop = chatBackdrop)
-          }
+      // 底部输入区域仅在 Chat Tab 下展示 (MIUIX 风格输入舱)
+      if (tab == DetailTab.CHAT) {
+        Box(
+          modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+        ) {
+          MiuixChatComposer(state, controller, drafts)
         }
       }
     }
@@ -425,30 +417,39 @@ private fun Conversation(
       items(questions, key = { "question-${it.id}" }) { MiuixQuestionCard(it, controller) }
     }
 
-    // 悬浮水滴下滑 FAB 按钮 (Liquid Scroll-to-Bottom FAB)
-    androidx.compose.animation.AnimatedVisibility(
+    // 悬浮下滑 FAB 按钮 (MIUIX 风格纯色圆形卡片)
+    AnimatedVisibility(
       visible = showScrollToBottom,
-      enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(spring(stiffness = Spring.StiffnessMedium)),
-      exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(),
+      enter = fadeIn() + scaleIn(spring(stiffness = Spring.StiffnessMedium)),
+      exit = fadeOut() + scaleOut(),
       modifier = Modifier
         .align(Alignment.BottomEnd)
         .padding(end = 16.dp, bottom = 148.dp)
     ) {
-      LiquidGlassSurface(
-        modifier = Modifier.size(42.dp),
+      Card(
+        modifier = Modifier
+          .size(42.dp)
+          .clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = {
+              if (total > 0) {
+                scope.launch { list.animateScrollToItem(total - 1) }
+              }
+            }
+          ),
         cornerRadius = 21.dp,
-        onClick = {
-          if (total > 0) {
-            scope.launch { list.animateScrollToItem(total - 1) }
-          }
-        }
+        insideMargin = PaddingValues(0.dp),
+        colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainerHighest)
       ) {
-        Icon(
-          imageVector = MiuixIcons.Back,
-          contentDescription = "回到底部",
-          tint = MiuixTheme.colorScheme.primary,
-          modifier = Modifier.size(20.dp).align(Alignment.Center).rotate(-90f)
-        )
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+          Icon(
+            imageVector = MiuixIcons.Back,
+            contentDescription = "回到底部",
+            tint = MiuixTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp).rotate(-90f)
+          )
+        }
       }
     }
   }
@@ -840,14 +841,13 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
 }
 
 /**
- * 搭载 Liquid Glass 悬浮质感的对话输入舱 (Composer Dock)
+ * 遵循 MIUIX 规范的对话输入舱 (Composer Dock)
  */
 @Composable
-private fun MiuixLiquidComposer(
+private fun MiuixChatComposer(
   state: LagoonState,
   controller: LagoonController,
-  drafts: MutableMap<String, String>,
-  backdrop: com.kyant.backdrop.Backdrop? = LocalBackdrop.current
+  drafts: MutableMap<String, String>
 ) {
   val draftKey = "${state.serverId}:${state.sessionId}"
   var filePicker by remember { mutableStateOf(false) }
@@ -861,7 +861,7 @@ private fun MiuixLiquidComposer(
   val running = task?.phase in TaskState.RUNNING_PHASES
   val draft = drafts[draftKey].orEmpty()
 
-  // 悬浮在底部的 Liquid Glass 交互舱
+  // 位于底部的 MIUIX 交互舱
   Column(
     modifier = Modifier
       .fillMaxWidth()
@@ -894,67 +894,65 @@ private fun MiuixLiquidComposer(
       horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically
     ) {
-      LiquidActionCapsule("📎 @文件", backdrop = backdrop) { filePicker = true }
+      MiuixActionCapsule("📎 @文件") { filePicker = true }
       if (state.commands.isNotEmpty()) {
-        LiquidActionCapsule("⚡ /命令", backdrop = backdrop) { commandPicker = true }
+        MiuixActionCapsule("⚡ /命令") { commandPicker = true }
       }
-      LiquidActionCapsule("🤖 " + (state.agent ?: "默认 Agent"), backdrop = backdrop) { agentSheet = true }
-      LiquidActionCapsule("🧠 " + (state.model?.label ?: "默认模型"), backdrop = backdrop) { modelSheet = true }
+      MiuixActionCapsule("🤖 " + (state.agent ?: "默认 Agent")) { agentSheet = true }
+      MiuixActionCapsule("🧠 " + (state.model?.label ?: "默认模型")) { modelSheet = true }
     }
 
-    // 输入舱核心 Surface (液态玻璃质感)
-    LiquidGlassSurface(
+    // 输入舱核心 Surface (MIUIX 卡片质感)
+    Card(
       modifier = Modifier.fillMaxWidth(),
-      cornerRadius = 24.dp,
-      mode = IosGlassMode.CLEAR,
-      backdrop = backdrop
+      cornerRadius = 20.dp,
+      insideMargin = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+      colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainerHighest)
     ) {
-      Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-        Box(Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 130.dp)) {
-          if (draft.isEmpty()) {
-            Text(
-              "输入任务描述或向 Agent 提问…",
-              style = MiuixTheme.textStyles.body1.copy(
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-              )
+      Box(Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 130.dp)) {
+        if (draft.isEmpty()) {
+          Text(
+            "输入任务描述或向 Agent 提问…",
+            style = MiuixTheme.textStyles.body1.copy(
+              color = MiuixTheme.colorScheme.onSurfaceVariantSummary
             )
-          }
-          BasicTextField(
-            value = draft,
-            onValueChange = { editDraft(drafts, draftKey, it) },
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface),
-            cursorBrush = androidx.compose.ui.graphics.SolidColor(MiuixTheme.colorScheme.primary),
-            maxLines = 5
           )
         }
+        BasicTextField(
+          value = draft,
+          onValueChange = { editDraft(drafts, draftKey, it) },
+          modifier = Modifier.fillMaxWidth(),
+          textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface),
+          cursorBrush = androidx.compose.ui.graphics.SolidColor(MiuixTheme.colorScheme.primary),
+          maxLines = 5
+        )
+      }
 
-        Row(
-          modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.End
-        ) {
-          if (running) {
-            Button(
-              onClick = controller::abort,
-              colors = ButtonDefaults.buttonColors(color = MiuixColorTokens.ErrorSubtle)
-            ) {
-              Text("停止", color = MiuixColorTokens.Error)
-            }
-          } else {
-            Button(
-              onClick = {
-                val text = draft.trim()
-                val submittedRevision = drafts["revision:$draftKey"]
-                controller.send(text) {
-                  if (drafts["revision:$draftKey"] == submittedRevision) editDraft(drafts, draftKey, "")
-                }
-              },
-              enabled = state.connected && !state.cached && !waiting && !running && draft.isNotBlank(),
-              colors = ButtonDefaults.buttonColorsPrimary()
-            ) {
-              Text("发送 ↑")
-            }
+      Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.End
+      ) {
+        if (running) {
+          Button(
+            onClick = controller::abort,
+            colors = ButtonDefaults.buttonColors(color = MiuixColorTokens.ErrorSubtle)
+          ) {
+            Text("停止", color = MiuixColorTokens.Error)
+          }
+        } else {
+          Button(
+            onClick = {
+              val text = draft.trim()
+              val submittedRevision = drafts["revision:$draftKey"]
+              controller.send(text) {
+                if (drafts["revision:$draftKey"] == submittedRevision) editDraft(drafts, draftKey, "")
+              }
+            },
+            enabled = state.connected && !state.cached && !waiting && !running && draft.isNotBlank(),
+            colors = ButtonDefaults.buttonColorsPrimary()
+          ) {
+            Text("发送 ↑")
           }
         }
       }
@@ -1103,24 +1101,26 @@ private fun MiuixLiquidComposer(
 }
 
 @Composable
-private fun LiquidActionCapsule(
+private fun MiuixActionCapsule(
   label: String,
-  backdrop: com.kyant.backdrop.Backdrop? = LocalBackdrop.current,
   onClick: () -> Unit
 ) {
-  LiquidGlassSurface(
+  Card(
+    modifier = Modifier.clickable(
+      interactionSource = remember { MutableInteractionSource() },
+      indication = null,
+      onClick = onClick
+    ),
     cornerRadius = 14.dp,
-    backdrop = backdrop,
-    mode = IosGlassMode.CLEAR,
-    onClick = onClick
+    insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+    colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
   ) {
     Text(
       text = label,
       style = MiuixTheme.textStyles.footnote2.copy(
         color = MiuixTheme.colorScheme.onSurface,
         fontWeight = FontWeight.Medium
-      ),
-      modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+      )
     )
   }
 }

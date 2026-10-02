@@ -9,13 +9,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.kyant.backdrop.Backdrop
 import kotlinx.coroutines.delay
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -24,21 +24,19 @@ import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-enum class LiquidToastType {
+enum class MiuixToastType {
   INFO, SUCCESS, ERROR
 }
 
 /**
- * 具有高斯模糊与透镜折射质感的悬浮轻提示 (Liquid Toast)
+ * 遵循小米 HyperOS / MIUIX 规范的全局轻提示 (Miuix Toast)
  */
 @Composable
-fun LiquidToastHost(
+fun MiuixToastHost(
   message: String?,
-  type: LiquidToastType = LiquidToastType.INFO,
+  type: MiuixToastType = MiuixToastType.INFO,
   onDismiss: () -> Unit,
-  modifier: Modifier = Modifier,
-  isDark: Boolean = false,
-  backdrop: Backdrop? = LocalBackdrop.current
+  modifier: Modifier = Modifier
 ) {
   LaunchedEffect(message) {
     if (message != null) {
@@ -56,41 +54,30 @@ fun LiquidToastHost(
     modifier = modifier
   ) {
     if (message != null) {
-      val pillShape = remember { miuixSquircleShape(LiquidGlassTokens.CapsuleCornerRadius) }
       val iconVector: ImageVector = when (type) {
-        LiquidToastType.SUCCESS -> MiuixIcons.Ok
-        LiquidToastType.ERROR -> MiuixIcons.Close
-        LiquidToastType.INFO -> MiuixIcons.Info
+        MiuixToastType.SUCCESS -> MiuixIcons.Ok
+        MiuixToastType.ERROR -> MiuixIcons.Close
+        MiuixToastType.INFO -> MiuixIcons.Info
       }
       val iconColor: Color = when (type) {
-        LiquidToastType.SUCCESS -> MiuixColorTokens.Success
-        LiquidToastType.ERROR -> MiuixColorTokens.Error
-        LiquidToastType.INFO -> MiuixColorTokens.Primary
+        MiuixToastType.SUCCESS -> MiuixColorTokens.Success
+        MiuixToastType.ERROR -> MiuixColorTokens.Error
+        MiuixToastType.INFO -> MiuixColorTokens.Primary
       }
 
-      Box(
+      Card(
         modifier = Modifier
           .padding(horizontal = 24.dp, vertical = 8.dp)
-          .shadow(
-            elevation = 16.dp,
-            shape = pillShape,
-            spotColor = if (isDark) Color(0x66000000) else Color(0x2E000000),
-            ambientColor = Color.Transparent
-          )
-          .liquidGlass(
-            cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
-            backdrop = backdrop,
-            isDark = isDark,
-            mode = IosGlassMode.TINTED,
-            tintColor = if (type == LiquidToastType.ERROR) MiuixColorTokens.Error else null
-          )
           .clickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
             onClick = onDismiss
-          )
-          .padding(horizontal = 16.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center
+          ),
+        cornerRadius = 14.dp,
+        insideMargin = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        colors = CardDefaults.defaultColors(
+          color = if (type == MiuixToastType.ERROR) MiuixColorTokens.ErrorSubtle else MiuixTheme.colorScheme.surfaceContainerHighest
+        )
       ) {
         Row(
           verticalAlignment = Alignment.CenterVertically,
@@ -106,7 +93,7 @@ fun LiquidToastHost(
             text = message,
             style = MiuixTheme.textStyles.body2.copy(
               fontWeight = FontWeight.Medium,
-              color = MiuixTheme.colorScheme.onSurface
+              color = if (type == MiuixToastType.ERROR) MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurface
             ),
             maxLines = 2
           )

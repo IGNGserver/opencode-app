@@ -10,7 +10,7 @@
 - `core/KeystoreCipher.kt`: `ServerStore`/`OfflineCache` 共用的 AndroidKeyStore AES-GCM 加解密。
 - `core/PairLink.kt`: 官方 `opencode pair` 链接解析（强制 HTTPS）。
 - `core/Http.kt` / `core/Diagnostics.kt`: 进程级 OkHttp 连接池/调度器；轻量日志。
-- `ui/`: 小米 HyperOS / MIUIX 风格页面、Liquid Glass 悬浮质感与不同消息 Part 的渲染；`MainActivity` 负责根导航与深链。
+- `ui/`: 小米 HyperOS / MIUIX 风格页面与不同消息 Part 的渲染；`MainActivity` 负责根导航与深链。
 - `system/`: 通知 Channel、Android Live Updates 请求、厂商灵动岛参数、任务前台服务与通知操作。全服务器任务总览沿用统一口径（`core/TaskSummary.kt`）：`TaskNotifications.buildSummary` 生成单条 ongoing 的 Live Update 通知（`setRequestPromotedOngoing` + `setShortCriticalText`），并由 `LagoonController` 在状态变化时统一发布；`system/IslandAdapters.kt` 按「能力探测 + 品牌兜底」把同一通知分发给小米超级岛、vivo 原子岛与标准实时更新通道（品牌矩阵见 `docs/ISLAND_ADAPTATION.md`）。
 - `push/`: 可选 FCM 客户端、设备注册/注销，以及推送消息 HMAC 校验（仅 v3，逐字段长度前缀 + 新鲜度 + 设备绑定 + 持久序号）；加密注销队列在 App 存活/启动时重试。收到后台推送时，`LagoonMessagingService` 会把每个会话的最新阶段写入持久映射，并据此重建并刷新全服务器任务总览通知，使 App 进程被杀后计数仍可继续更新。
 - `companion/`: OpenCode 插件与只传递任务元数据的 FCM 伴随服务；插件先持久化有序事件，companion 原子提交设备/任务状态/去重/待投递队列；同会话最新待发状态覆盖旧状态，单文件单进程写入。
