@@ -94,12 +94,36 @@
 
 ---
 
+## 7. 代码生成（spec → Kotlin wire 模型）
+
+- 生成器：`tools/gen_v2_models.py`，输入 `app/openapi-v2.json`（已版本化冻结），输出
+  `app/src/main/java/com/igng/opencode/mobile/core/generated/V2Wire.kt`（请勿手改）。
+- 重新生成：`python3 tools/gen_v2_models.py app/openapi-v2.json > app/src/main/java/com/igng/opencode/mobile/core/generated/V2Wire.kt`
+- 覆盖：V2 的 object / anyOf union 全部生成为类型化 data class + `fromJson`，union 用判别字段
+  （单值 enum）穷举分发；字段名/可选性/判别**全部来自 spec，零手写**。
+- 接线：`V2Contract` 的 `project`/`session`/`permission` 已改用生成类型（`GProject`/`GSessionInfo`/
+  `GPermissionRequest`）解析；消息/工具 union 保留手写映射到统一 UI 模型（anyOf→UI 的粘合层），
+  其字段正确性由 `V2WireTest` 的 spec 样本 round-trip 保证。
+- 验证：`V2WireTest` round-trip spec 样本（含 union 判别分发、未知判别返回 null）。
+
+> 说明：spec 用 `anyOf`（非 `oneOf`+discriminator）表达 union，标准 OpenAPI Generator 对 `anyOf`
+> 支持差且会强制 kotlinx 迁移，故用自带生成器：保持 org.json 架构、`anyOf` 用判别字段穷举。
+
+## 8. 事件细粒度 reconcile
+
+- `MessageStore`：按 messageID/partID 归并的 reconcile 核心（官方 sync.tsx 语义）。
+- V1：`message.updated`/`message.part.updated`/`message.part.delta`/`message.part.removed`/`message.removed`
+  就地改存储，不全量刷新。
+- V2：`session.next.*` 用 `assistantMessageID` + `textID`/`callID`/`reasoningID` 精确定位 part，
+  流式 delta 就地追加（断线重连由 patchPart 创建缺失 part 补齐）；标题经 `session.updated` 单条 reconcile。
+- 抓取合并：空文本不覆盖本地已有流式文本；未建模事件对当前会话去抖刷新兜底，绝不丢内容。
+
+---
+
 ## 已知简化与边界（诚实声明）
 
-1. **事件增量更新**：官方客户端按 `message.part.updated`（V1）/ `session.next.*`（V2）做细粒度
-   reconcile。本实现对消息内容采用"事件触发去抖刷新该会话"，标题/归属用单条 reconcile。
-   这是**刻意的正确性优先**取舍（移动端频繁重连、消息量小，全量刷新代价低且绝不丢内容），
-   而非遗漏。若日后要极致性能，可按 V2 `session.next.*` 补增量。
+1. **事件增量更新**：已实现细粒度 reconcile（见 §8）。V1 全增量、V2 按 `session.next.*` 精确定位 part
+   流式更新；仅未建模的结构性事件（step 边界、agent/model 切换）对当前会话去抖刷新兜底。
 2. **V2 `form` 只做最小映射**：V2 问答形态 `Form.*` 字段较复杂，当前映射为统一 `QuestionRequest`
    的核心字段；复杂表单字段（多类型 fields）尚未完整建模。
 3. **V1 问答无 REST 回复端点**（官方 SDK 端点表已核对）：V1 问题仅事件推送，REST 回复路径

@@ -58,6 +58,7 @@ class MobileController private constructor(private val context: Context) {
   private var messageRefresh: Job? = null
   private var lastEventId = ""
   private val sendMutex = Mutex()
+  private val messageStore = MessageStore()
 
   init { if (mutable.value.profiles.any { it.id == mutable.value.serverId && it.autoConnect }) connect(mutable.value.serverId!!) }
   fun password(serverId: String): String = store.password(serverId)
@@ -229,12 +230,13 @@ class MobileController private constructor(private val context: Context) {
     if (event.type in setOf("session.created", "session.updated", "session.deleted", "session.idle", "session.error", "permission.asked", "question.asked", "permission.replied", "permission.rejected", "question.replied", "question.rejected")) {
       eventRefresh?.cancel()
       eventRefresh = scope.launch { delay(350); if (generation > 0) reload() }
-    } else if (event.type in setOf("message.updated", "message.part.updated") && sessionId == mutable.value.sessionId) {
-      val session = mutable.value.session ?: return
-      messageRefresh?.cancel()
-      messageRefresh = scope.launch { delay(350); loadSession(session, ancillary = false) }
+    } else if (isMessageEvent(event.type)) {
+      handleMessageEvent(event, sessionId)
     }
   }
+
+  /** 消息级/流式事件（V1 message.* 与 V2 session.next.*）。 */
+  private fun isMessageEvent(type: String): Boolean = type.startsWith("message.") || type.startsWith("session.next.")
   /** 用事件里的会话 info 单条更新列表（标题/更新时间/归属），不整表覆盖。 */
   private fun reconcileSession(info: JSONObject) {
     if (info.length() == 0) return
@@ -258,6 +260,94 @@ class MobileController private constructor(private val context: Context) {
     if (!profile.notifications) return
     current.tasks[sessionId]?.let { notifications.show(profile, session, it, current.permissions.firstOrNull { p -> p.sessionId == sessionId }) }
   }
+
+  /**
+   * 消息级细粒度 reconcile（官方 sync.tsx 语义）。
+   * V1：`message.updated`/`message.part.updated`/`message.part.delta`/`message.part.removed`/`message.removed` 就地改 MessageStore。
+   * V2：`session.next.*` 用 assistantMessageID + textID/callID/reasoningID 精确定位 part，就地流式更新。
+   * 未建模的事件对当前会话去抖刷新兜底，绝不丢内容。
+   */
+  private fun handleMessageEvent(event: ServerEvent, sessionId: String) {
+    if (sessionId.isBlank()) return
+    val props = event.properties
+    var handled = true
+    // V2 流式事件公共定位符
+    val mid = props.str("assistantMessageID")
+    val ts = props.optLong("timestamp").takeIf { it > 0 } ?: System.currentTimeMillis()
+    fun ensureAssistant(id: String) {
+      if (messageStore.snapshot(sessionId).none { it.id == id })
+        messageStore.upsertMessage(sessionId, Message(id, "assistant", ts, emptyList()))
+    }
+    when (event.type) {
+      /* ---- V1 聚合事件 ---- */
+      "message.updated" -> messageStore.upsertMessage(sessionId, V1Contract.info(props.obj("info")))
+      "message.part.updated" -> {
+        val partJson = props.obj("part")
+        messageStore.upsertPart(sessionId, partJson.str("messageID"), V1Contract.part(partJson))
+      }
+      "message.part.delta" -> {
+        val pid = props.str("partID"); val delta = props.str("delta")
+        messageStore.patchPart(sessionId, props.str("messageID"), pid, MessagePart(pid, "text")) { it.copy(text = it.text + delta) }
+      }
+      "message.part.removed" -> messageStore.removePart(sessionId, props.str("messageID"), props.str("partID"))
+      "message.removed" -> messageStore.removeMessage(sessionId, props.str("messageID"))
+
+      /* ---- V2 session.next.* 流式事件 ---- */
+      "session.next.text.started" -> { val t = props.str("textID"); ensureAssistant(mid); messageStore.upsertPart(sessionId, mid, MessagePart(t, "text")) }
+      "session.next.text.delta" -> { val t = props.str("textID"); messageStore.patchPart(sessionId, mid, t, MessagePart(t, "text")) { it.copy(text = it.text + props.str("delta")) } }
+      "session.next.text.ended" -> { val t = props.str("textID"); ensureAssistant(mid); messageStore.upsertPart(sessionId, mid, MessagePart(t, "text", text = props.str("text"))) }
+
+      "session.next.reasoning.started" -> { val r = props.str("reasoningID"); ensureAssistant(mid); messageStore.upsertPart(sessionId, mid, MessagePart(r, "reasoning")) }
+      "session.next.reasoning.delta" -> { val r = props.str("reasoningID"); messageStore.patchPart(sessionId, mid, r, MessagePart(r, "reasoning")) { it.copy(text = it.text + props.str("delta")) } }
+      "session.next.reasoning.ended" -> { val r = props.str("reasoningID"); ensureAssistant(mid); messageStore.upsertPart(sessionId, mid, MessagePart(r, "reasoning", text = props.str("text"))) }
+
+      "session.next.tool.input.started" -> { val c = props.str("callID"); ensureAssistant(mid); messageStore.upsertPart(sessionId, mid, MessagePart(c, "tool", tool = props.str("name"), status = "running")) }
+      "session.next.tool.input.delta" -> { val c = props.str("callID"); messageStore.patchPart(sessionId, mid, c, MessagePart(c, "tool")) { it.copy(input = it.input + props.str("delta")) } }
+      "session.next.tool.input.ended" -> { val c = props.str("callID"); messageStore.patchPart(sessionId, mid, c, MessagePart(c, "tool")) { it.copy(input = props.str("text")) } }
+
+      "session.next.tool.called" -> {
+        val c = props.str("callID"); ensureAssistant(mid)
+        messageStore.upsertPart(sessionId, mid, MessagePart(c, "tool", tool = props.str("tool"), status = "running", input = props.valueText("input")))
+      }
+      "session.next.tool.progress" -> {
+        val c = props.str("callID")
+        messageStore.patchPart(sessionId, mid, c, MessagePart(c, "tool", status = "running")) {
+          it.copy(status = "running", output = v2ToolText(props.arr("content")).ifBlank { it.output })
+        }
+      }
+      "session.next.tool.success" -> {
+        val c = props.str("callID"); ensureAssistant(mid)
+        messageStore.upsertPart(sessionId, mid, MessagePart(c, "tool",
+          tool = messageStore.snapshot(sessionId).firstOrNull { it.id == mid }?.parts?.firstOrNull { it.id == c }?.tool.orEmpty(),
+          status = "completed", output = v2ToolText(props.arr("content")),
+          files = v2ToolFiles(props.arr("content")) + props.arr("outputPaths").strings()))
+      }
+      "session.next.tool.failed" -> {
+        val c = props.str("callID"); ensureAssistant(mid)
+        messageStore.patchPart(sessionId, mid, c, MessagePart(c, "tool")) {
+          it.copy(status = "error", error = props.obj("error").str("message").ifBlank { props.obj("error").toString() })
+        }
+      }
+
+      "session.next.shell.started" -> { val c = props.str("callID"); ensureAssistant(mid); messageStore.upsertPart(sessionId, mid, MessagePart(c, "tool", tool = "shell", title = props.str("command"), status = "running")) }
+      "session.next.shell.ended" -> messageStore.patchPart(sessionId, mid, props.str("callID"), MessagePart(props.str("callID"), "tool", tool = "shell")) { it.copy(status = "exited", output = props.str("output")) }
+
+      else -> handled = false
+    }
+    if (handled) {
+      if (sessionId == mutable.value.sessionId) mutable.update { it.copy(messages = messageStore.snapshot(sessionId)) }
+    } else if (sessionId == mutable.value.sessionId) {
+      // 未建模事件：去抖刷新兜底（step 边界、agent/model 切换等结构性事件）
+      val session = mutable.value.session ?: return
+      messageRefresh?.cancel()
+      messageRefresh = scope.launch { delay(350); loadSession(session, ancillary = false) }
+    }
+  }
+
+  private fun v2ToolText(content: org.json.JSONArray): String =
+    content.objects().filter { it.str("type") == "text" }.joinToString("\n") { it.str("text") }
+  private fun v2ToolFiles(content: org.json.JSONArray): List<String> =
+    content.objects().filter { it.str("type") == "file" }.map { it.str("name").ifBlank { it.str("uri") } }
   fun selectProject(id: String) {
     val project = mutable.value.projects.firstOrNull { it.id == id } ?: return
     mutable.update { it.copy(projectId = id, sessionId = null, messages = emptyList(), agent = null, model = null) }
@@ -300,7 +390,8 @@ class MobileController private constructor(private val context: Context) {
     if (token != generation) return
     mutable.value.serverId?.let { cache.saveMessages(it, session.id, messages) }
     if (token != generation || mutable.value.sessionId != session.id) return
-    mutable.update { it.copy(messages = messages) }
+    messageStore.mergeFetched(session.id, messages)
+    mutable.update { it.copy(messages = messageStore.snapshot(session.id)) }
     if (ancillary) {
       val todos = runCatching { client.todos(session) }.getOrDefault(emptyList())
       val children = runCatching { client.children(session) }.getOrDefault(emptyList())

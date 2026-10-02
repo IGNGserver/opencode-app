@@ -38,15 +38,17 @@ internal object V1Contract {
   /* ---- WithParts = { info: Message, parts: Part[] } ---- */
   fun message(json: JSONObject): Message {
     val info = json.obj("info")
-    val parts = json.arr("parts").objects().map(::part)
-    return Message(
-      id = info.str("id"),
-      role = info.str("role"),
-      created = info.longPath("time", "created"),
-      parts = parts,
-      error = info.errorMessage().ifBlank { null }
-    )
+    return info(info).copy(parts = json.arr("parts").objects().map(::part))
   }
+
+  /** 只有 info（如 `message.updated` 事件），parts 由 `message.part.updated` 单独补齐。 */
+  fun info(json: JSONObject): Message = Message(
+    id = json.str("id"),
+    role = json.str("role"),
+    created = json.longPath("time", "created"),
+    parts = emptyList(),
+    error = json.errorMessage().ifBlank { null }
+  )
 
   fun messages(array: JSONArray): List<Message> = array.objects().map(::message)
 

@@ -1,5 +1,8 @@
 package com.igng.opencode.mobile.core
 
+import com.igng.opencode.mobile.core.generated.Project as GProject
+import com.igng.opencode.mobile.core.generated.Session_Info as GSessionInfo
+import com.igng.opencode.mobile.core.generated.Permission_Request as GPermissionRequest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -19,24 +22,29 @@ import org.json.JSONObject
  */
 internal object V2Contract {
 
-  /* ---- Project ---- */
-  fun project(json: JSONObject): Project = Project(
-    id = json.str("id"),
-    directory = json.str("canonical"),          // V2 路径标识字段
-    name = json.str("name").ifBlank { json.str("canonical").substringAfterLast('/') },
-    timeUpdated = json.longPath("time", "updated")
-  )
+  /* ---- Project ----（经生成类型 GProject 解析，字段名源自 spec） */
+  fun project(json: JSONObject): Project {
+    val p = GProject.fromJson(json)
+    val canonical = p.canonical.orEmpty()
+    return Project(
+      id = p.id.orEmpty(),
+      directory = canonical,                          // V2 路径标识字段 canonical
+      name = p.name.orEmpty().ifBlank { canonical.substringAfterLast('/') },
+      timeUpdated = (p.time?.updated ?: 0.0).toLong()
+    )
+  }
 
-  /* ---- Session.Info ---- */
+  /* ---- Session.Info ----（经生成类型 GSessionInfo 解析） */
   fun session(json: JSONObject): Session {
-    val title = json.str("title")                // V2 title 可缺省（非 required）
+    val s = GSessionInfo.fromJson(json)
+    val title = s.title.orEmpty()                     // V2 title 可缺省
     return Session(
-      id = json.str("id"),
-      directory = json.obj("location").str("directory"),
+      id = s.id.orEmpty(),
+      directory = s.location?.directory.orEmpty(),    // 目录在 location.directory
       title = title,
-      updated = json.longPath("time", "updated"),
-      parentId = json.str("parentID").takeIf { it.isNotBlank() },
-      projectId = json.str("projectID"),
+      updated = (s.time?.updated ?: 0.0).toLong(),
+      parentId = s.parentID,
+      projectId = s.projectID.orEmpty(),              // 归属用 projectID
       titleIsDefault = V1Contract.isDefaultTitle(title)
     )
   }
@@ -123,18 +131,20 @@ internal object V2Contract {
     content.objects().filter { it.str("type") == "file" }
       .map { it.str("name").ifBlank { it.str("uri") }.ifBlank { it.str("uri") } }
 
-  /* ---- Permission.Request（V2） ---- */
+  /* ---- Permission.Request（V2）----（经生成类型 GPermissionRequest 解析） */
   fun permission(json: JSONObject, directory: String): PermissionRequest {
+    val p = GPermissionRequest.fromJson(json)
     val source = json.obj("source")
+    val isTool = source.str("type") == "tool"
     return PermissionRequest(
-      id = json.str("id"),
-      sessionId = json.str("sessionID"),
+      id = p.id.orEmpty(),
+      sessionId = p.sessionID.orEmpty(),
       directory = directory,
-      action = json.str("action"),
-      detail = json.arr("resources").toString().ifBlank { json.obj("metadata").toString() },
-      always = json.arr("save").strings(),
-      toolMessageId = if (source.str("type") == "tool") source.str("messageID") else "",
-      toolCallId = if (source.str("type") == "tool") source.str("id") else ""
+      action = p.action.orEmpty(),
+      detail = (p.resources ?: emptyList()).toString().ifBlank { json.obj("metadata").toString() },
+      always = p.save ?: emptyList(),
+      toolMessageId = if (isTool) source.str("messageID") else "",
+      toolCallId = if (isTool) source.str("id") else ""
     )
   }
 }
