@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -25,6 +26,7 @@ import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
 import com.kyant.backdrop.shadow.InnerShadow
 import top.yukonga.miuix.kmp.basic.Icon
@@ -79,10 +81,16 @@ internal fun LiquidGlassDock(
             backdrop = backdrop,
             shape = { pillShape },
             effects = {
-              blur(30f)
-              lens(20f, 32f)
+              vibrancy() // 提升色彩饱和度
+              blur(18.dp.toPx()) // 纯正深度模糊
+              lens(
+                refractionHeight = 20.dp.toPx(),
+                refractionAmount = 32.dp.toPx(),
+                depthEffect = true,
+                chromaticAberration = true // 边缘真实色散
+              )
             },
-            highlight = { Highlight.Default.copy(alpha = if (isDark) 0.85f else 1.0f) },
+            highlight = { Highlight.Default.copy(alpha = if (isDark) 0.80f else 0.95f) },
             innerShadow = {
               InnerShadow(
                 radius = 12.dp,
@@ -114,6 +122,16 @@ internal fun LiquidGlassDock(
         }
       )
       .clip(pillShape)
+      .border(
+        width = 0.5.dp,
+        brush = Brush.verticalGradient(
+          listOf(
+            borderColor.copy(alpha = if (isDark) 0.75f else 0.85f),
+            borderColor.copy(alpha = if (isDark) 0.15f else 0.25f)
+          )
+        ),
+        shape = pillShape
+      )
       .padding(horizontal = 8.dp, vertical = 6.dp)
   ) {
     Row(

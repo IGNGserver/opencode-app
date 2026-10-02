@@ -24,11 +24,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.util.lerp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
 import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
@@ -38,21 +40,43 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 val LocalBackdrop = compositionLocalOf<Backdrop?> { null }
 
+/**
+ * iOS 原生液态玻璃外观模式 (Liquid Glass Appearance)
+ * - CLEAR: 通透透镜质感，极致的透光与环境折射
+ * - TINTED: 微磨砂材质，增强复杂背景下的色彩对比与文字可读性
+ */
+enum class IosGlassMode {
+  CLEAR,
+  TINTED
+}
+
 object LiquidGlassTokens {
   val PillCornerRadius = 32.dp
   val DockCornerRadius = 26.dp
   val CapsuleCornerRadius = 14.dp
   val ControlCornerRadius = 18.dp
 
-  val LightSurface = Color(0x73FFFFFF)
-  val LightSurfaceVariant = Color(0x40E0E8F5)
-  val LightBorder = Color(0x80FFFFFF)
+  // iOS 原生浅色液态玻璃色令
+  val LightClearSurface = Color(0x2EFFFFFF)
+  val LightClearVariant = Color(0x18FFFFFF)
+  val LightTintedSurface = Color(0x8CFFFFFF)
+  val LightTintedVariant = Color(0x66E5EEFA)
+  val LightBorder = Color(0x59FFFFFF)
   val LightHighlight = Color(0xE6FFFFFF)
 
-  val DarkSurface = Color(0x661E232B)
-  val DarkSurfaceVariant = Color(0x402A323D)
+  // iOS 原生深色液态玻璃色令
+  val DarkClearSurface = Color(0x3812151B)
+  val DarkClearVariant = Color(0x221B2028)
+  val DarkTintedSurface = Color(0x94161B22)
+  val DarkTintedVariant = Color(0x75212936)
   val DarkBorder = Color(0x40FFFFFF)
   val DarkHighlight = Color(0x8069A1FF)
+
+  // 兼容既有代码调用
+  val LightSurface = LightTintedSurface
+  val LightSurfaceVariant = LightTintedVariant
+  val DarkSurface = DarkTintedSurface
+  val DarkSurfaceVariant = DarkTintedVariant
 }
 
 fun miuixSquircleShape(cornerRadius: Dp = 16.dp): Shape {
@@ -62,26 +86,41 @@ fun miuixSquircleShape(cornerRadius: Dp = 16.dp): Shape {
   )
 }
 
+/**
+ * 严格按照 iOS 26+ Liquid Glass 光学折射、色散、色彩增艳与连续曲率设计的修饰符
+ */
 fun Modifier.liquidGlass(
   cornerRadius: Dp = LiquidGlassTokens.ControlCornerRadius,
   backdrop: Backdrop? = null,
   isDark: Boolean = false,
+  mode: IosGlassMode = IosGlassMode.TINTED,
   alphaMultiplier: Float = 1f,
   tintColor: Color? = null,
-  borderWidth: Dp = 1.dp
+  borderWidth: Dp = 0.5.dp
 ): Modifier {
   val shape = miuixSquircleShape(cornerRadius)
 
+  val (rawBase, rawVariant) = when (mode) {
+    IosGlassMode.CLEAR -> if (isDark) {
+      LiquidGlassTokens.DarkClearSurface to LiquidGlassTokens.DarkClearVariant
+    } else {
+      LiquidGlassTokens.LightClearSurface to LiquidGlassTokens.LightClearVariant
+    }
+    IosGlassMode.TINTED -> if (isDark) {
+      LiquidGlassTokens.DarkTintedSurface to LiquidGlassTokens.DarkTintedVariant
+    } else {
+      LiquidGlassTokens.LightTintedSurface to LiquidGlassTokens.LightTintedVariant
+    }
+  }
+
   val baseColor = when {
-    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.35f * alphaMultiplier else 0.25f * alphaMultiplier)
-    isDark -> LiquidGlassTokens.DarkSurface.copy(alpha = 0.55f * alphaMultiplier)
-    else -> LiquidGlassTokens.LightSurface.copy(alpha = 0.65f * alphaMultiplier)
+    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.32f * alphaMultiplier else 0.22f * alphaMultiplier)
+    else -> rawBase.copy(alpha = rawBase.alpha * alphaMultiplier)
   }
 
   val variantColor = when {
-    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.18f * alphaMultiplier else 0.12f * alphaMultiplier)
-    isDark -> LiquidGlassTokens.DarkSurfaceVariant.copy(alpha = 0.40f * alphaMultiplier)
-    else -> LiquidGlassTokens.LightSurfaceVariant.copy(alpha = 0.45f * alphaMultiplier)
+    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.16f * alphaMultiplier else 0.10f * alphaMultiplier)
+    else -> rawVariant.copy(alpha = rawVariant.alpha * alphaMultiplier)
   }
 
   val highlightColor = if (isDark) LiquidGlassTokens.DarkHighlight else LiquidGlassTokens.LightHighlight
@@ -95,14 +134,20 @@ fun Modifier.liquidGlass(
         backdrop = backdrop,
         shape = { shape },
         effects = {
-          blur(24f)
-          lens(16f, 24f)
+          vibrancy() // 1.5x 色彩增艳饱和度，iOS 标志性透亮
+          blur(16.dp.toPx()) // 纯正深度高斯模糊
+          lens(
+            refractionHeight = 18.dp.toPx(),
+            refractionAmount = 28.dp.toPx(),
+            depthEffect = true,
+            chromaticAberration = true // 物理真实 RGB 彩虹色散边缘
+          )
         },
-        highlight = { Highlight.Default.copy(alpha = if (isDark) 0.7f else 0.9f) },
+        highlight = { Highlight.Default.copy(alpha = if (isDark) 0.75f else 0.95f) },
         innerShadow = {
           InnerShadow(
-            radius = 8.dp,
-            color = if (isDark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.35f),
+            radius = 10.dp,
+            color = if (isDark) Color.White.copy(alpha = 0.09f) else Color.White.copy(alpha = 0.40f),
             alpha = 1f
           )
         },
@@ -116,8 +161,8 @@ fun Modifier.liquidGlass(
         width = borderWidth,
         brush = Brush.verticalGradient(
           listOf(
-            borderColor.copy(alpha = 0.85f),
-            borderColor.copy(alpha = 0.25f)
+            borderColor.copy(alpha = if (isDark) 0.75f else 0.85f),
+            borderColor.copy(alpha = if (isDark) 0.15f else 0.25f)
           )
         ),
         shape = shape
@@ -156,24 +201,28 @@ fun Modifier.liquidGlass(
   }
 }
 
+/**
+ * 搭载 iOS 原生流体弹簧动力学与背景隔离采样的 Liquid Glass 容器
+ */
 @Composable
 fun LiquidGlassSurface(
   modifier: Modifier = Modifier,
   cornerRadius: Dp = LiquidGlassTokens.PillCornerRadius,
   backdrop: Backdrop? = LocalBackdrop.current,
   isDark: Boolean = false,
+  mode: IosGlassMode = IosGlassMode.TINTED,
   tintColor: Color? = null,
   onClick: (() -> Unit)? = null,
   content: @Composable BoxScope.() -> Unit
 ) {
   var isPressed by remember { mutableStateOf(false) }
-  val scale by animateFloatAsState(
-    targetValue = if (isPressed && onClick != null) 0.96f else 1.0f,
+  val pressProgress by animateFloatAsState(
+    targetValue = if (isPressed && onClick != null) 1f else 0f,
     animationSpec = spring(
-      dampingRatio = Spring.DampingRatioMediumBouncy,
-      stiffness = Spring.StiffnessMedium
+      dampingRatio = 0.72f, // iOS 原生弹簧阻尼
+      stiffness = 380f // 舒适跟手弹性
     ),
-    label = "liquidGlassScale"
+    label = "liquidGlassSpring"
   )
 
   val interactionModifier = if (onClick != null) {
@@ -189,19 +238,124 @@ fun LiquidGlassSurface(
     }
   } else Modifier
 
-  Box(
-    modifier = modifier
-      .graphicsLayer {
-        scaleX = scale
-        scaleY = scale
-      }
-      .then(interactionModifier)
-      .liquidGlass(
-        cornerRadius = cornerRadius,
-        backdrop = backdrop,
-        isDark = isDark,
-        tintColor = tintColor
-      ),
-    content = content
-  )
+  val shape = miuixSquircleShape(cornerRadius)
+
+  val (rawBase, rawVariant) = when (mode) {
+    IosGlassMode.CLEAR -> if (isDark) {
+      LiquidGlassTokens.DarkClearSurface to LiquidGlassTokens.DarkClearVariant
+    } else {
+      LiquidGlassTokens.LightClearSurface to LiquidGlassTokens.LightClearVariant
+    }
+    IosGlassMode.TINTED -> if (isDark) {
+      LiquidGlassTokens.DarkTintedSurface to LiquidGlassTokens.DarkTintedVariant
+    } else {
+      LiquidGlassTokens.LightTintedSurface to LiquidGlassTokens.LightTintedVariant
+    }
+  }
+
+  val baseColor = when {
+    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.32f else 0.22f)
+    else -> rawBase
+  }
+
+  val variantColor = when {
+    tintColor != null -> tintColor.copy(alpha = if (isDark) 0.16f else 0.10f)
+    else -> rawVariant
+  }
+
+  val highlightColor = if (isDark) LiquidGlassTokens.DarkHighlight else LiquidGlassTokens.LightHighlight
+  val borderColor = if (isDark) LiquidGlassTokens.DarkBorder else LiquidGlassTokens.LightBorder
+
+  if (backdrop != null) {
+    Box(
+      modifier = modifier
+        .then(interactionModifier)
+        .drawBackdrop(
+          backdrop = backdrop,
+          shape = { shape },
+          effects = {
+            vibrancy()
+            blur(16.dp.toPx())
+            lens(
+              refractionHeight = 18.dp.toPx(),
+              refractionAmount = 28.dp.toPx(),
+              depthEffect = true,
+              chromaticAberration = true
+            )
+          },
+          highlight = { Highlight.Default.copy(alpha = if (isDark) 0.75f else 0.95f) },
+          innerShadow = {
+            InnerShadow(
+              radius = 10.dp,
+              color = if (isDark) Color.White.copy(alpha = 0.09f) else Color.White.copy(alpha = 0.40f),
+              alpha = 1f
+            )
+          },
+          layerBlock = {
+            // 背景绝对静止！仅前景透镜产生 iOS 拟物微果冻形变 (Squish)
+            val scale = lerp(1f, 0.955f, pressProgress)
+            scaleX = scale
+            scaleY = scale
+          },
+          onDrawSurface = {
+            drawRect(
+              Brush.verticalGradient(listOf(baseColor, variantColor))
+            )
+          }
+        )
+        .border(
+          width = 0.5.dp,
+          brush = Brush.verticalGradient(
+            listOf(
+              borderColor.copy(alpha = if (isDark) 0.75f else 0.85f),
+              borderColor.copy(alpha = if (isDark) 0.15f else 0.25f)
+            )
+          ),
+          shape = shape
+        )
+        .clip(shape),
+      content = content
+    )
+  } else {
+    val scale = lerp(1f, 0.955f, pressProgress)
+    Box(
+      modifier = modifier
+        .graphicsLayer {
+          scaleX = scale
+          scaleY = scale
+        }
+        .then(interactionModifier)
+        .clip(shape)
+        .background(
+          Brush.verticalGradient(listOf(baseColor, variantColor)),
+          shape = shape
+        )
+        .drawBehind {
+          val strokePx = 0.5.dp.toPx()
+          drawLine(
+            brush = Brush.horizontalGradient(
+              listOf(
+                highlightColor.copy(alpha = 0.05f),
+                highlightColor.copy(alpha = 0.85f),
+                highlightColor.copy(alpha = 0.05f)
+              )
+            ),
+            start = Offset(cornerRadius.toPx(), strokePx / 2),
+            end = Offset(size.width - cornerRadius.toPx(), strokePx / 2),
+            strokeWidth = strokePx
+          )
+        }
+        .border(
+          width = 0.5.dp,
+          brush = Brush.verticalGradient(
+            listOf(
+              borderColor.copy(alpha = 0.85f),
+              borderColor.copy(alpha = 0.25f)
+            )
+          ),
+          shape = shape
+        ),
+      content = content
+    )
+  }
 }
