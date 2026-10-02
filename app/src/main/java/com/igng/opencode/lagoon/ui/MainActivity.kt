@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.igng.opencode.lagoon.core.LagoonController
+import com.igng.opencode.lagoon.core.LagoonState
 import com.igng.opencode.lagoon.push.PushRegistration
 import kotlinx.coroutines.CancellationException
 import top.yukonga.miuix.kmp.basic.*
@@ -54,9 +55,10 @@ class MainActivity : ComponentActivity() {
 
       val preferences = remember { getSharedPreferences("ui", MODE_PRIVATE) }
       var dark by remember { mutableStateOf(preferences.getBoolean("dark", false)) }
-      var currentTab by rememberSaveable { mutableStateOf(RootTab.HOME) }
+      var currentTab by rememberSaveable { mutableStateOf(RootTab.SESSIONS) }
       var inChatDetail by rememberSaveable { mutableStateOf(false) }
       var showingServersSheet by remember { mutableStateOf(false) }
+      var showingNewSession by remember { mutableStateOf(false) }
       var globalMessage by remember { mutableStateOf<String?>(null) }
       var globalMessageType by remember { mutableStateOf(MiuixToastType.INFO) }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -95,7 +97,7 @@ class MainActivity : ComponentActivity() {
         }
       }
 
-      // 统一的应用内返回栈：对话详情 → 所属标签页 → 工作台 → 交给系统退出。
+      // 统一的应用内返回栈：对话详情 → 所属标签页 → 会话首页 → 交给系统退出。
       // 层级判定集中在 AppBackStack，便于无设备单测“侧滑只回上一级、不回桌面”。
       // 预见式返回的进度直接驱动详情层位移，实时预览上一级；提交后才切换状态。
       val canNavigateBack = AppBackStack.canGoBack(inChatDetail, currentTab)
@@ -148,8 +150,8 @@ class MainActivity : ComponentActivity() {
           topBar = {
             if (!inChatDetail) {
               Box(Modifier.fillMaxWidth()) {
-                // 在从二级标签页向工作台预见式返回时，工作台的 TopBar 视差淡入露出
-                if (stage == BackStage.TAB_TO_HOME && (gestureActive || progress > 0.01f)) {
+                // 在从二级标签页向会话首页预见式返回时，会话首页的 TopBar 视差淡入露出
+                if (stage == BackStage.TAB_TO_ROOT && (gestureActive || progress > 0.01f)) {
                   Box(
                     Modifier
                       .fillMaxWidth()
@@ -158,46 +160,12 @@ class MainActivity : ComponentActivity() {
                         translationX = -(1f - visualProgress) * 40.dp.toPx()
                       }
                   ) {
-                    TopAppBar(
-                      title = "工作台",
-                      largeTitle = "任务工作台",
+                    SessionsTopBar(
+                      state = state,
+                      controller = controller,
                       scrollBehavior = homeScrollBehavior,
-                      navigationIcon = {
-                        Card(
-                          modifier = Modifier
-                            .padding(start = 12.dp)
-                            .clickable(
-                              interactionSource = remember { MutableInteractionSource() },
-                              indication = null,
-                              onClick = { showingServersSheet = true }
-                            ),
-                          cornerRadius = 14.dp,
-                          insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                          colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
-                        ) {
-                          Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                          ) {
-                            Box(
-                              Modifier.size(8.dp).background(
-                                if (state.connected) MiuixColorTokens.Success else MiuixColorTokens.Warning,
-                                shape = miuixSquircleShape(4.dp)
-                              )
-                            )
-                            Text(
-                              text = state.server?.name ?: "选择服务器",
-                              style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium)
-                            )
-                            Text("▾", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                          }
-                        }
-                      },
-                      actions = {
-                        IconButton(onClick = controller::reload) {
-                          Icon(imageVector = MiuixIcons.Refresh, contentDescription = "刷新")
-                        }
-                      }
+                      onServers = { showingServersSheet = true },
+                      onNewSession = { showingNewSession = true }
                     )
                   }
                 }
@@ -207,68 +175,26 @@ class MainActivity : ComponentActivity() {
                   Modifier
                     .fillMaxWidth()
                     .graphicsLayer {
-                      if (stage == BackStage.TAB_TO_HOME) {
+                      if (stage == BackStage.TAB_TO_ROOT) {
                         alpha = 1f - visualProgress
                         translationX = visualProgress * size.width * 0.85f
                       }
                     }
                 ) {
                   when (currentTab) {
-                    RootTab.HOME -> {
-                      TopAppBar(
-                        title = "工作台",
-                        largeTitle = "任务工作台",
-                        scrollBehavior = homeScrollBehavior,
-                        navigationIcon = {
-                          Card(
-                            modifier = Modifier
-                              .padding(start = 12.dp)
-                              .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { showingServersSheet = true }
-                              ),
-                            cornerRadius = 14.dp,
-                            insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
-                          ) {
-                            Row(
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                              Box(
-                                Modifier.size(8.dp).background(
-                                  if (state.connected) MiuixColorTokens.Success else MiuixColorTokens.Warning,
-                                  shape = miuixSquircleShape(4.dp)
-                                )
-                              )
-                              Text(
-                                text = state.server?.name ?: "选择服务器",
-                                style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium)
-                              )
-                              Text("▾", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                            }
-                          }
-                        },
+                    RootTab.SESSIONS -> SessionsTopBar(
+                      state = state,
+                      controller = controller,
+                      scrollBehavior = homeScrollBehavior,
+                      onServers = { showingServersSheet = true },
+                      onNewSession = { showingNewSession = true }
+                    )
+                    RootTab.ACTIVITY -> {
+                      SmallTopAppBar(
+                        title = "活动",
                         actions = {
                           IconButton(onClick = controller::reload) {
                             Icon(imageVector = MiuixIcons.Refresh, contentDescription = "刷新")
-                          }
-                        }
-                      )
-                    }
-                    RootTab.SESSIONS -> {
-                      SmallTopAppBar(
-                        title = "全部会话",
-                        actions = {
-                          IconButton(onClick = {
-                            if (!state.protocol.supportsTitleOnCreate) {
-                              controller.createSession("") { inChatDetail = true }
-                            } else {
-                              controller.createSession("新任务") { inChatDetail = true }
-                            }
-                          }) {
-                            Icon(imageVector = MiuixIcons.Add, contentDescription = "新建会话")
                           }
                         }
                       )
@@ -310,9 +236,9 @@ class MainActivity : ComponentActivity() {
                 val visualProgress = androidx.compose.animation.core.FastOutSlowInEasing.transform(progress)
 
                 // 底层/目标舞台：
-                // 1. 如果在二级标签页向工作台回退，底层预先渲染 HomeScreen 供用户预览
+                // 1. 如果在二级标签页向会话首页回退，底层预先渲染会话首页供用户预览
                 // 2. 如果在详情页向所属标签页回退，底层渲染当前标签页，随手势微量缩放放大
-                if (stage == BackStage.TAB_TO_HOME && (gestureActive || progress > 0.01f)) {
+                if (stage == BackStage.TAB_TO_ROOT && (gestureActive || progress > 0.01f)) {
                   Box(
                     Modifier
                       .fillMaxSize()
@@ -324,7 +250,7 @@ class MainActivity : ComponentActivity() {
                         translationX = -(1f - visualProgress) * 48.dp.toPx()
                       }
                   ) {
-                    HomeScreen(
+                    SessionsHomeScreen(
                       state = state,
                       controller = controller,
                       onOpen = { sessionId ->
@@ -332,7 +258,7 @@ class MainActivity : ComponentActivity() {
                         inChatDetail = true
                       },
                       onServers = { showingServersSheet = true },
-                      onSessions = { currentTab = RootTab.SESSIONS },
+                      onNewSession = { showingNewSession = true },
                       scrollBehavior = homeScrollBehavior
                     )
                   }
@@ -350,7 +276,7 @@ class MainActivity : ComponentActivity() {
                         scaleX = scale
                         scaleY = scale
                         alpha = 0.85f + visualProgress * 0.15f
-                      } else if (stage == BackStage.TAB_TO_HOME) {
+                      } else if (stage == BackStage.TAB_TO_ROOT) {
                         // 在 TAB_TO_HOME 手势中，当前 Tab 作为一个卡片向右滑出
                         translationX = visualProgress * size.width * 0.90f
                         val scale = 1f - visualProgress * 0.06f
@@ -361,7 +287,7 @@ class MainActivity : ComponentActivity() {
                       }
                     }
                     .then(
-                      if (stage == BackStage.TAB_TO_HOME && (gestureActive || progress > 0.01f)) {
+                      if (stage == BackStage.TAB_TO_ROOT && (gestureActive || progress > 0.01f)) {
                         Modifier.clip(miuixSquircleShape((visualProgress * 24).dp))
                       } else {
                         Modifier
@@ -370,7 +296,7 @@ class MainActivity : ComponentActivity() {
                     .background(MiuixTheme.colorScheme.background)
                 ) {
                   when (currentTab) {
-                    RootTab.HOME -> HomeScreen(
+                    RootTab.SESSIONS -> SessionsHomeScreen(
                       state = state,
                       controller = controller,
                       onOpen = { sessionId ->
@@ -378,10 +304,10 @@ class MainActivity : ComponentActivity() {
                         inChatDetail = true
                       },
                       onServers = { showingServersSheet = true },
-                      onSessions = { currentTab = RootTab.SESSIONS },
+                      onNewSession = { showingNewSession = true },
                       scrollBehavior = homeScrollBehavior
                     )
-                    RootTab.SESSIONS -> SessionsScreen(
+                    RootTab.ACTIVITY -> ActivityScreen(
                       state = state,
                       controller = controller,
                       onOpen = { sessionId ->
@@ -522,7 +448,24 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { showingServersSheet = false },
                 onConnected = {
                   showingServersSheet = false
-                  currentTab = RootTab.HOME
+                  currentTab = RootTab.SESSIONS
+                }
+              )
+            }
+
+            // 新建会话 BottomSheet：同样必须留在 Scaffold 内容作用域内（见上方 ServersModal 注释）。
+            if (showingNewSession) {
+              NewSessionSheet(
+                state = state,
+                controller = controller,
+                onDismiss = { showingNewSession = false },
+                onServers = {
+                  showingNewSession = false
+                  showingServersSheet = true
+                },
+                onStarted = {
+                  showingNewSession = false
+                  inChatDetail = true
                 }
               )
             }
@@ -544,4 +487,66 @@ class MainActivity : ComponentActivity() {
     val parts = uri.pathSegments
     if (parts.size >= 3 && parts[1] == "session") deepLink = parts[0] to parts[2]
   }
+}
+
+/**
+ * 会话首页顶栏：服务器是全局上下文（● name ▾ 打开切换弹层），
+ * 右侧为刷新与「＋」新建会话（BottomSheet 快速选择 Server / 项目 / Agent / 模型并输入首条 Prompt）。
+ */
+@Composable
+private fun SessionsTopBar(
+  state: LagoonState,
+  controller: LagoonController,
+  scrollBehavior: ScrollBehavior?,
+  onServers: () -> Unit,
+  onNewSession: () -> Unit
+) {
+  TopAppBar(
+    title = "会话",
+    largeTitle = "会话",
+    scrollBehavior = scrollBehavior,
+    navigationIcon = {
+      Card(
+        modifier = Modifier
+          .padding(start = 12.dp)
+          .clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = onServers
+          ),
+        cornerRadius = 14.dp,
+        insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+        colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+          Box(
+            Modifier.size(8.dp).background(
+              when {
+                state.connected -> MiuixColorTokens.Success
+                state.loading -> MiuixColorTokens.Info
+                else -> MiuixColorTokens.Warning
+              },
+              shape = miuixSquircleShape(4.dp)
+            )
+          )
+          Text(
+            text = state.server?.name ?: "选择服务器",
+            style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium)
+          )
+          Text("▾", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
+        }
+      }
+    },
+    actions = {
+      IconButton(onClick = { controller.reload() }) {
+        Icon(imageVector = MiuixIcons.Refresh, contentDescription = "刷新")
+      }
+      IconButton(onClick = onNewSession) {
+        Icon(imageVector = MiuixIcons.Add, contentDescription = "新建会话")
+      }
+    }
+  )
 }

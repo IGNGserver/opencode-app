@@ -563,6 +563,20 @@ class LagoonController private constructor(private val appContext: Context) {
     op.commitConnection { it.copy(sessions = (listOf(session) + it.sessions).distinctBy { s -> s.id }) }
     if (op.isCurrent(this)) { selectSession(session.id); onCreated?.invoke(session) }
   }
+  /**
+   * 新建会话一步流：建会话后直接发送第一条 Prompt，免去"空会话 → 再发一条消息"的往返。
+   * 首条消息复用 [send]，命令解析、任务计数与前台服务逻辑不重复实现。
+   */
+  fun startSession(title: String, prompt: String, onStarted: ((Session) -> Unit)? = null) = act { op ->
+    val project = op.snapshot.project ?: error("先选择项目")
+    val session = op.client.createSession(project.directory, title)
+    op.commitConnection { it.copy(sessions = (listOf(session) + it.sessions).distinctBy { s -> s.id }) }
+    if (op.isCurrent(this)) {
+      selectSession(session.id)
+      onStarted?.invoke(session)
+      send(prompt)
+    }
+  }
   fun send(text: String, accepted: (() -> Unit)? = null) = act { op ->
     val session = op.snapshot.session ?: error("先打开会话")
     sendMutex.withLock {

@@ -40,7 +40,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
-private enum class DetailTab(val label: String) { CHAT("对话"), TODO("待办"), CHANGES("改动"), FILES("文件"), CHILDREN("子任务") }
+private enum class ChatSheet { TODO, CHANGES, FILES, CHILDREN }
 
 @Composable
 fun ChatScreen(
@@ -50,15 +50,8 @@ fun ChatScreen(
   onBack: () -> Unit
 ) {
   val session = state.session
-  val availableTabs = remember(state.protocol) {
-    if (!state.protocol.supportsTodosAndDiff) {
-      listOf(DetailTab.CHAT, DetailTab.FILES, DetailTab.CHILDREN)
-    } else {
-      DetailTab.entries
-    }
-  }
 
-  var tab by remember(state.sessionId) { mutableStateOf(DetailTab.CHAT) }
+  var sheet by remember { mutableStateOf<ChatSheet?>(null) }
   var menuSheet by remember { mutableStateOf(false) }
   var rename by remember { mutableStateOf(false) }
   var title by remember(session?.id) { mutableStateOf(session?.title ?: "") }
@@ -148,57 +141,84 @@ fun ChatScreen(
       }
     )
 
-    // 分段 TabRow 导航条
-    val tabNames = availableTabs.map { item ->
-      val count = when (item) {
-        DetailTab.TODO -> state.todos.size
-        DetailTab.CHANGES -> state.changes.size
-        DetailTab.CHILDREN -> state.children.size
-        else -> 0
+    // 会话上下文摘要条：项目 · 服务器；待办 / 改动 / 子任务 / 文件是上下文入口（弹层），
+    // 不再与 Chat 平级分 Tab。Chat 始终是 Session 的主界面。
+    val contextLabel = listOfNotNull(
+      state.projects.firstOrNull { it.directory == session.directory }?.name
+        ?: session.directory.substringAfterLast('/').ifBlank { session.directory },
+      state.server?.name
+    ).joinToString(" · ")
+    Text(
+      text = contextLabel,
+      style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
+    )
+    val todoDone = state.todos.count { it.status == "completed" }
+    val additions = state.changes.sumOf { it.additions }
+    val deletions = state.changes.sumOf { it.deletions }
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .horizontalScroll(rememberScrollState())
+        .padding(horizontal = 16.dp, vertical = 4.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      MiuixActionCapsule(if (state.todos.isEmpty()) "待办" else "待办 $todoDone/${state.todos.size}") { sheet = ChatSheet.TODO }
+      if (state.protocol.supportsTodosAndDiff) {
+        MiuixActionCapsule(if (state.changes.isEmpty()) "改动" else "改动 +$additions −$deletions") { sheet = ChatSheet.CHANGES }
       }
-      item.label + if (count > 0) " ($count)" else ""
-    }
-    val currentTabIdx = availableTabs.indexOf(tab).coerceAtLeast(0)
-    Box(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-      TabRow(
-        tabs = tabNames,
-        selectedTabIndex = currentTabIdx,
-        onTabSelected = { index ->
-          val selected = availableTabs[index]
-          tab = selected
-          if (selected == DetailTab.FILES) controller.listFiles()
-        }
-      )
+      MiuixActionCapsule(if (state.children.isEmpty()) "子任务" else "子任务 ${state.children.size}") { sheet = ChatSheet.CHILDREN }
+      MiuixActionCapsule("📎 文件") {
+        sheet = ChatSheet.FILES
+        controller.listFiles()
+      }
     }
 
     // 主内容面板与底部输入舱
     Box(Modifier.weight(1f).fillMaxWidth()) {
-      when (tab) {
-        DetailTab.CHAT -> Conversation(
-          state,
-          controller,
-          Modifier.fillMaxSize(),
-          contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp)
-        )
-        DetailTab.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
-        DetailTab.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
-        DetailTab.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
-          val key = "${state.serverId}:${state.sessionId}"
-          val current = drafts[key].orEmpty()
-          editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
-          tab = DetailTab.CHAT
-        }, Modifier.fillMaxSize())
-        DetailTab.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
-      }
+      Conversation(
+        state,
+        controller,
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp)
+      )
 
-      // 底部输入区域仅在 Chat Tab 下展示 (MIUIX 风格输入舱)
-      if (tab == DetailTab.CHAT) {
-        Box(
-          modifier = Modifier
-            .align(Alignment.BottomCenter)
-            .fillMaxWidth()
-        ) {
-          MiuixChatComposer(state, controller, drafts)
+      Box(
+        modifier = Modifier
+          .align(Alignment.BottomCenter)
+          .fillMaxWidth()
+      ) {
+        MiuixChatComposer(state, controller, drafts)
+      }
+    }
+  }
+
+  // 会话上下文详情弹层：待办 / 改动 / 子任务 / 文件
+  sheet?.let { which ->
+    SuperBottomSheet(
+      title = when (which) {
+        ChatSheet.TODO -> "待办"
+        ChatSheet.CHANGES -> "改动"
+        ChatSheet.FILES -> "文件浏览"
+        ChatSheet.CHILDREN -> "子任务"
+      },
+      show = true,
+      onDismissRequest = { sheet = null }
+    ) {
+      Box(Modifier.fillMaxWidth().fillMaxHeight(0.72f)) {
+        when (which) {
+          ChatSheet.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
+          ChatSheet.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
+          ChatSheet.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
+            val key = "${state.serverId}:${state.sessionId}"
+            val current = drafts[key].orEmpty()
+            editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
+            sheet = null
+          }, Modifier.fillMaxSize())
+          ChatSheet.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
         }
       }
     }
@@ -251,6 +271,11 @@ fun ChatScreen(
         MiuixMenuActionItem("恢复撤销", MiuixIcons.Redo) {
           menuSheet = false
           controller.unrevert()
+        }
+        MiuixMenuActionItem("文件浏览", MiuixIcons.File) {
+          menuSheet = false
+          sheet = ChatSheet.FILES
+          controller.listFiles()
         }
 
         if (state.protocol.supportsSessionActions) {
@@ -497,12 +522,8 @@ private fun MiuixMessageCard(message: Message) {
 private fun MiuixMessagePart(part: MessagePart) {
   when (part.type) {
     "text" -> MarkdownText(part.text)
-    "reasoning" -> MiuixExpandableCard("💡 深度思考推演", part.text, defaultOpen = false)
-    "tool" -> MiuixExpandableCard(
-      "🛠️ " + part.title.ifBlank { part.tool.ifBlank { "工具调用" } } + " · " + part.status,
-      listOf(part.input.takeIf { it.isNotBlank() }?.let { "输入\n$it" }, part.output.takeIf { it.isNotBlank() }?.let { "输出\n$it" }).filterNotNull().joinToString("\n\n"),
-      defaultOpen = false
-    )
+    "reasoning" -> MiuixExpandableCard("💡 深度思考", part.text, defaultOpen = false)
+    "tool" -> MiuixToolTrace(part)
     "file" -> MiuixInfoChip("文件路径", part.path.ifBlank { part.text })
     "patch", "diff" -> MiuixExpandableCard(
       "📝 代码变更",
@@ -515,6 +536,125 @@ private fun MiuixMessagePart(part: MessagePart) {
     "step-start", "step-finish", "snapshot", "compaction" -> Unit
     else -> MiuixInfoChip(part.type.ifBlank { "内容" }, part.text.ifBlank { part.title })
   }
+}
+
+/**
+ * 工具调用默认是一行紧凑执行轨迹（Read / Edit / Bash …），点按才展开输入输出，
+ * 不再为每次调用生成一张大卡片。
+ */
+@Composable
+private fun MiuixToolTrace(part: MessagePart) {
+  val status = part.status.lowercase()
+  val failed = part.error.isNotBlank() || status in setOf("error", "failed")
+  val done = status in setOf("completed", "done", "success")
+  val accent = when {
+    failed -> MiuixColorTokens.Error
+    done -> MiuixColorTokens.Success
+    else -> MiuixColorTokens.Primary
+  }
+  var open by remember(part.id) { mutableStateOf(false) }
+  Surface(
+    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+    shape = miuixSquircleShape(10.dp),
+    color = MiuixTheme.colorScheme.secondaryContainer
+  ) {
+    Column {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .clickable { open = !open }
+          .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Box(Modifier.size(6.dp).background(accent, CircleShape))
+        Spacer(Modifier.width(8.dp))
+        Text(
+          text = toolLabel(part.tool),
+          style = MiuixTheme.textStyles.footnote2.copy(color = accent, fontWeight = FontWeight.Bold)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+          text = toolSummary(part),
+          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+          text = if (open) "▾" else "▸",
+          fontSize = 11.sp,
+          color = MiuixTheme.colorScheme.onSurfaceVariantActions
+        )
+      }
+      if (open) {
+        HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine)
+        Column(
+          modifier = Modifier.fillMaxWidth().padding(10.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+          ToolTraceBlock("输入", part.input)
+          ToolTraceBlock("输出", part.output)
+          ToolTraceBlock("错误", part.error, isError = true)
+          if (part.files.isNotEmpty()) {
+            Text(
+              text = "产出：" + part.files.joinToString("、"),
+              style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            )
+          }
+          if (part.input.isBlank() && part.output.isBlank() && part.error.isBlank()) {
+            Text(
+              text = "无详细输入输出",
+              style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ToolTraceBlock(label: String, content: String, isError: Boolean = false) {
+  if (content.isBlank()) return
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    shape = miuixSquircleShape(8.dp),
+    color = if (isError) MiuixColorTokens.ErrorSubtle else MiuixTheme.colorScheme.background
+  ) {
+    Column(Modifier.fillMaxWidth().padding(8.dp)) {
+      Text(
+        text = label,
+        style = MiuixTheme.textStyles.footnote2.copy(
+          color = if (isError) MiuixColorTokens.Error else MiuixTheme.colorScheme.primary,
+          fontWeight = FontWeight.Bold
+        )
+      )
+      Text(
+        text = content,
+        style = MiuixTheme.textStyles.footnote2.copy(fontFamily = FontFamily.Monospace)
+      )
+    }
+  }
+}
+
+private fun toolLabel(tool: String): String = when (tool.lowercase()) {
+  "read", "readfile", "read_file" -> "Read"
+  "edit", "write", "multiedit", "patch", "apply_patch", "writefile" -> "Edit"
+  "bash", "shell", "exec", "runcommand" -> "Bash"
+  "grep", "search", "glob", "list", "ls", "grepsearch", "codebase_search" -> "Search"
+  "task", "subagent", "agent", "dispatch_agent" -> "Task"
+  "webfetch", "websearch", "fetch" -> "Web"
+  "todowrite", "todoread", "todo" -> "Todo"
+  else -> tool.ifBlank { "工具" }
+}
+
+private fun toolSummary(part: MessagePart): String {
+  val direct = part.title.ifBlank { part.path }.ifBlank { part.text }
+  if (direct.isNotBlank()) return direct.replace('\n', ' ').take(120)
+  val match = Regex("\"(?:command|filePath|path|pattern|query|url|file|notebookPath)\"\\s*:\\s*\"([^\"]*)\"").find(part.input)
+  return match?.groupValues?.get(1)?.replace('\n', ' ')?.take(120)
+    ?: part.input.lineSequence().firstOrNull()?.trim()?.take(120).orEmpty()
 }
 
 @Composable
