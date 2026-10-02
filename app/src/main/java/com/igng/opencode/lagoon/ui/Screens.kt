@@ -10,6 +10,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,7 +59,7 @@ import java.util.UUID
  * ------------------------------------------------------------------ */
 
 private fun projectName(state: LagoonState, session: Session): String =
-  state.projects.firstOrNull { it.directory == session.directory }?.name
+  resolveSessionProject(session, state.projects)?.name
     ?: session.directory.substringAfterLast('/').ifBlank { session.directory }
 
 private class DateFormatterCache {
@@ -101,161 +106,54 @@ private fun formatElapsed(since: Long, now: Long = System.currentTimeMillis()): 
 }
 
 @Composable
-fun SessionsHomeScreen(
-  state: LagoonState,
-  controller: LagoonController,
-  onOpen: (String) -> Unit,
-  onServers: () -> Unit,
-  onNewSession: () -> Unit,
-  scrollBehavior: ScrollBehavior? = null
-) {
-  var query by remember { mutableStateOf("") }
-
-  fun matches(session: Session): Boolean =
-    query.isBlank() || session.title.contains(query, true) ||
-      projectName(state, session).contains(query, true) || session.directory.contains(query, true)
-
-  val attention = state.sessions.filter {
-    state.tasks[it.id]?.phase in TaskState.WAITING_PHASES && matches(it)
-  }
-  val running = state.sessions.filter { session ->
-    val phase = state.tasks[session.id]?.phase
-    (phase in TaskState.RUNNING_PHASES || phase == TaskPhase.DISCONNECTED) && attention.none { it.id == session.id } && matches(session)
-  }
-  val rest = state.sessions.filterNot { session -> attention.any { it.id == session.id } || running.any { it.id == session.id } }
-    .filter(::matches)
-  val groups = rest.groupBy { it.directory }
-    .map { (directory, list) -> directory to list.sortedByDescending { it.updated } }
-    .sortedByDescending { (_, list) -> list.maxOfOrNull { it.updated } ?: 0L }
-
-  LazyColumn(
-    modifier = Modifier.fillMaxSize().overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
-    verticalArrangement = Arrangement.spacedBy(6.dp)
-  ) {
-    if (state.degraded || state.cached) {
-      item {
-        Card(
-          colors = CardDefaults.defaultColors(color = MiuixColorTokens.WarningSubtle),
-          insideMargin = PaddingValues(14.dp)
-        ) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-              imageVector = MiuixIcons.Info,
-              contentDescription = null,
-              tint = MiuixColorTokens.Warning,
-              modifier = Modifier.size(20.dp)
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-              text = if (state.degraded) "部分服务器数据未能成功同步，相关显示可能为上一次已知值。"
-              else "当前处于离线离网模式，恢复连接后将自动同步。",
-              style = MiuixTheme.textStyles.body2.copy(color = MiuixColorTokens.Warning)
-            )
-          }
-        }
-      }
+fun SessionsHomeScreen(state: LagoonState, controller: LagoonController, onOpen: (String) -> Unit, onServers: () -> Unit, onNewSession: () -> Unit, scrollBehavior: ScrollBehavior? = null) {
+  var query by rememberSaveable(state.serverId, state.projectId) { mutableStateOf("") }
+  var filter by rememberSaveable(state.serverId, state.projectId) { mutableStateOf(0) }
+  val list = rememberLazyListState()
+  val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() } }
+  val roots = state.sessions.filter { it.parentId == null && (state.projectId == null || resolveSessionProject(it, state.projects)?.id == state.projectId) }
+  val shown = roots.filter { session ->
+    val content = state.previews[session.id]?.content ?: SessionContent.UNKNOWN
+    val draft = session.id in state.draftSessions
+    val category = when (filter) {
+      1 -> content == SessionContent.CONTENT && !session.archived
+      2 -> draft && !session.archived
+      3 -> content == SessionContent.EMPTY && !draft && !session.archived
+      4 -> session.archived
+      else -> !session.archived && (content != SessionContent.EMPTY || draft || state.rootTasks[session.id]?.active == true)
     }
-
+    category && (query.isBlank() || state.title(session).contains(query, true) || session.directory.contains(query, true))
+  }.sortedWith(compareByDescending<Session> { state.rootTasks[it.id]?.phase in TaskState.WAITING_PHASES }
+    .thenByDescending { state.rootTasks[it.id]?.active == true }.thenByDescending { it.updated })
+  LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    if (!state.streamConnected || state.degraded || state.cached) item {
+      Text(when { state.cached && state.connected -> "会话缓存 · 部分数据待同步"
+        state.cached -> "离线缓存${if (state.catalogComplete) "" else " · 仅保留最近会话"}"
+        state.degraded -> "部分数据未同步，保留上次结果"; state.connected -> "可连接服务器 · 实时同步恢复中"; else -> "正在连接服务器" },
+        color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote1)
+    }
+    item { TextField(query, { query = it }, label = "搜索当前项目会话", useLabelAsPlaceholder = true, modifier = Modifier.fillMaxWidth()) }
     item {
-      TextField(
-        value = query,
-        onValueChange = { text: String -> query = text },
-        useLabelAsPlaceholder = true,
-        label = "搜索会话或项目…",
-        modifier = Modifier.fillMaxWidth(),
-        leadingIcon = {
-          Icon(
-            imageVector = MiuixIcons.Search,
-            contentDescription = "搜索",
-            modifier = Modifier.padding(horizontal = 10.dp),
-            tint = MiuixTheme.colorScheme.onSecondaryContainer
-          )
-        }
-      )
-    }
-
-    if (attention.isNotEmpty()) {
-      item { MiuixSectionHeader("需要处理", attention.size) }
-      items(attention, key = { "attention-${it.id}" }) { session ->
-        MiuixSessionRow(
-          session = session,
-          task = state.tasks[session.id],
-          meta = buildMeta(state, session, state.tasks[session.id]),
-          onClick = { onOpen(session.id) },
-          emphasized = true,
-          trailing = formatRelative(session.updated)
-        )
+      Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+        listOf("常规", "有内容", "草稿", "空会话", "已归档").forEachIndexed { index, name -> SelectChip(name, filter == index) { filter = index } }
       }
     }
-
-    if (running.isNotEmpty()) {
-      item { MiuixSectionHeader("正在运行", running.size) }
-      items(running, key = { "running-${it.id}" }) { session ->
-        MiuixSessionRow(
-          session = session,
-          task = state.tasks[session.id],
-          meta = buildMeta(state, session, state.tasks[session.id]),
-          onClick = { onOpen(session.id) },
-          trailing = state.tasks[session.id]?.let { formatElapsed(it.since) } ?: formatRelative(session.updated)
-        )
-      }
+    items(shown, key = { it.id }) { session ->
+      val task = state.rootTasks[session.id]
+      val preview = state.previews[session.id]
+      MiuixSessionRow(session.copy(title = state.title(session)), task,
+        listOfNotNull(preview?.text?.takeIf(String::isNotBlank), "草稿未发送".takeIf { session.id in state.draftSessions },
+          "内容待确认".takeIf { preview?.content in setOf(null, SessionContent.UNKNOWN) },
+          "${state.parents.count { it.value == session.id }} 个子任务".takeIf { state.parents.values.any { it == session.id } }).joinToString(" · "),
+        { onOpen(session.id) }, task?.phase in TaskState.WAITING_PHASES,
+        if (task?.active == true) formatElapsed(task.since, now) else formatRelative(session.updated, now))
     }
-
-    groups.forEach { (directory, list) ->
-      val name = state.projects.firstOrNull { it.directory == directory }?.name
-        ?: directory.substringAfterLast('/').ifBlank { directory }
-      item(key = "group-$directory") {
-        Row(
-          Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 2.dp),
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          Text(
-            name,
-            style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Bold),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-          )
-          Spacer(Modifier.width(8.dp))
-          Text(
-            directory,
-            style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-          )
-          Text(
-            "${list.size}",
-            style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          )
-        }
-      }
-      items(list, key = { "rest-${it.id}" }) { session ->
-        MiuixSessionRow(
-          session = session,
-          task = state.tasks[session.id],
-          meta = buildMeta(state, session, state.tasks[session.id], includeServer = true),
-          onClick = { onOpen(session.id) },
-          trailing = formatRelative(session.updated)
-        )
-      }
+    if (shown.isEmpty()) item {
+      if (state.loading) MiuixEmptyStateCard("正在读取会话", "加载完成后会显示当前项目的主会话。")
+      else MiuixEmptyActionCard(if (state.connected) "暂无符合条件的会话" else "连接 OpenCode", "切换筛选或项目，也可以创建第一项任务。",
+        if (state.connected) "新建会话" else "添加服务器", if (state.connected) onNewSession else onServers)
     }
-
-    if (attention.isEmpty() && running.isEmpty() && groups.isEmpty()) {
-      item {
-        if (state.sessions.isEmpty() && query.isBlank()) {
-          MiuixEmptyActionCard(
-            title = if (state.connected) "尚无会话" else "连接 OpenCode",
-            subtitle = if (state.connected) "点右上角「＋」，选择项目与 Agent 后直接输入第一条任务。"
-            else "添加远程工作站以开始协同开发。",
-            action = if (state.connected) "新建会话" else "添加服务器",
-            onAction = if (state.connected) onNewSession else onServers
-          )
-        } else {
-          MiuixEmptyActionCard("没有匹配的会话", "换个关键词，或清除搜索。", "清除搜索") { query = "" }
-        }
-      }
-    }
+    if (state.sessionCursors.isNotEmpty()) item { TextButton(text = if (state.pending("sessions-more")) "正在加载…" else "加载更多会话", enabled = !state.pending("sessions-more"), onClick = { controller.loadMoreSessions() }, modifier = Modifier.fillMaxWidth()) }
   }
 }
 
@@ -389,19 +287,20 @@ fun ActivityScreen(
 ) {
   val permissions = state.permissions
   val questions = state.questions
+  val now by produceState(System.currentTimeMillis()) { while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() } }
   val running = state.sessions.filter { session ->
-    val phase = state.tasks[session.id]?.phase
-    phase in TaskState.RUNNING_PHASES || phase == TaskPhase.DISCONNECTED
+    val phase = state.rootTasks[session.id]?.phase
+    session.parentId == null && (phase in TaskState.RUNNING_PHASES || phase == TaskPhase.DISCONNECTED)
   }
   val finished = state.sessions.mapNotNull { session ->
-    state.tasks[session.id]
+    state.rootTasks[session.id]?.takeIf { session.parentId == null }
       ?.takeIf { it.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) }
       ?.let { session to it }
   }.sortedByDescending { it.second.since }.take(12)
 
   LazyColumn(
     modifier = Modifier.fillMaxSize().overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 110.dp),
+    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp)
   ) {
     if (permissions.isEmpty() && questions.isEmpty() && running.isEmpty() && finished.isEmpty()) {
@@ -428,11 +327,11 @@ fun ActivityScreen(
       item { MiuixSectionHeader("正在运行", running.size) }
       items(running, key = { "activity-running-${it.id}" }) { session ->
         MiuixSessionRow(
-          session = session,
-          task = state.tasks[session.id],
+          session = session.copy(title = state.title(session)),
+          task = state.rootTasks[session.id],
           meta = buildMeta(state, session, state.tasks[session.id], includeServer = true),
           onClick = { onOpen(session.id) },
-          trailing = state.tasks[session.id]?.let { formatElapsed(it.since) } ?: formatRelative(session.updated)
+          trailing = state.tasks[session.id]?.let { formatElapsed(it.since, now) } ?: formatRelative(session.updated)
         )
       }
     }
@@ -441,11 +340,11 @@ fun ActivityScreen(
       item { MiuixSectionHeader("最近完成", finished.size) }
       items(finished, key = { "activity-done-${it.first.id}" }) { (session, task) ->
         MiuixSessionRow(
-          session = session,
+          session = session.copy(title = state.title(session)),
           task = task,
           meta = buildMeta(state, session, null, includeServer = true),
           onClick = { onOpen(session.id) },
-          trailing = formatRelative(task.since)
+          trailing = formatRelative(task.finishedAt ?: task.since)
         )
       }
     }
@@ -461,7 +360,7 @@ private fun MiuixSessionAnchor(state: LagoonState, sessionId: String, onOpen: (S
       .fillMaxWidth()
       .clickable(
         interactionSource = remember { MutableInteractionSource() },
-        indication = null,
+        indication = androidx.compose.foundation.LocalIndication.current,
         onClick = { onOpen(sessionId) }
       )
       .padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
@@ -475,7 +374,7 @@ private fun MiuixSessionAnchor(state: LagoonState, sessionId: String, onOpen: (S
     )
     Spacer(Modifier.width(6.dp))
     Text(
-      text = session.title,
+      text = state.title(session),
       style = MiuixTheme.textStyles.footnote1.copy(
         color = MiuixTheme.colorScheme.primary,
         fontWeight = FontWeight.Medium
@@ -505,10 +404,14 @@ fun NewSessionSheet(
   onServers: () -> Unit,
   onStarted: (Session) -> Unit
 ) {
-  var prompt by remember { mutableStateOf("") }
-  var title by remember { mutableStateOf("") }
-  var agentExpanded by remember { mutableStateOf(false) }
-  var modelExpanded by remember { mutableStateOf(false) }
+  var newAgent by rememberSaveable(state.serverId, state.projectId) { mutableStateOf<String?>(null) }
+  var newProvider by rememberSaveable(state.serverId, state.projectId) { mutableStateOf<String?>(null) }
+  var newModelId by rememberSaveable(state.serverId, state.projectId) { mutableStateOf<String?>(null) }
+  val newModel = state.models.firstOrNull { it.providerId == newProvider && it.modelId == newModelId }
+  var prompt by rememberSaveable(state.serverId) { mutableStateOf("") }
+  var title by rememberSaveable(state.serverId) { mutableStateOf("") }
+  var agentExpanded by rememberSaveable(state.serverId) { mutableStateOf(false) }
+  var modelExpanded by rememberSaveable(state.serverId) { mutableStateOf(false) }
 
   SuperBottomSheet(
     title = "新建会话",
@@ -519,8 +422,7 @@ fun NewSessionSheet(
       Modifier
         .fillMaxWidth()
         .fillMaxHeight(0.82f)
-        .imePadding()
-        .padding(horizontal = 16.dp)
+                .padding(horizontal = 16.dp)
     ) {
       Column(
         Modifier.weight(1f).overScrollVertical().verticalScroll(rememberScrollState()),
@@ -588,30 +490,30 @@ fun NewSessionSheet(
         Text("执行配置", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
         SuperArrow(
           title = "Agent",
-          summary = state.agent ?: "服务器默认",
+          summary = newAgent ?: "服务器默认",
           onClick = { agentExpanded = !agentExpanded }
         )
         if (agentExpanded) {
-          OptionRow("服务器默认", state.agent == null) { controller.chooseAgent(null); agentExpanded = false }
+          OptionRow("服务器默认", newAgent == null) { newAgent = null; agentExpanded = false }
           state.agents.forEach { agent ->
-            OptionRow(agent.name, state.agent == agent.name) { controller.chooseAgent(agent.name); agentExpanded = false }
+            OptionRow(agent.name, newAgent == agent.name) { newAgent = agent.name; agentExpanded = false }
           }
         }
         SuperArrow(
           title = "模型",
-          summary = state.model?.label ?: "服务器默认",
+          summary = newModel?.label ?: "服务器默认",
           onClick = { modelExpanded = !modelExpanded }
         )
         if (modelExpanded) {
-          OptionRow("服务器默认", state.model == null) { controller.chooseModel(null); modelExpanded = false }
+          OptionRow("服务器默认", newModel == null) { newProvider = null; newModelId = null; modelExpanded = false }
           state.models.forEach { model ->
-            OptionRow("${model.providerId} · ${model.label}", state.model == model) {
-              controller.chooseModel(model); modelExpanded = false
+            OptionRow("${model.providerId} · ${model.label}", newModel == model) {
+              newProvider = model.providerId; newModelId = model.modelId; modelExpanded = false
             }
           }
         }
 
-        if (state.protocol.supportsTitleOnCreate) {
+        if (state.capabilities.titleOnCreate) {
           Text("标题（可选）", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
           TextField(
             value = title,
@@ -651,13 +553,13 @@ fun NewSessionSheet(
       Button(
         onClick = {
           val promptText = prompt.trim()
-          controller.startSession(title.trim(), promptText) { session -> onStarted(session) }
+          controller.startSession(title.trim(), promptText, newAgent, newModel) { session -> onStarted(session) }
         },
-        enabled = state.connected && !state.cached && prompt.isNotBlank() && state.project != null,
+        enabled = !state.pending("create") && state.connected && !state.cached && prompt.isNotBlank() && state.project != null,
         modifier = Modifier.fillMaxWidth(),
         colors = ButtonDefaults.buttonColorsPrimary()
       ) {
-        Text("开始任务 ↑")
+        Text(if (state.pending("create")) "正在创建…" else "开始任务")
       }
       if (!state.connected) {
         Text(
@@ -676,7 +578,7 @@ private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
   Card(
     modifier = Modifier.clickable(
       interactionSource = remember { MutableInteractionSource() },
-      indication = null,
+      indication = androidx.compose.foundation.LocalIndication.current,
       onClick = onClick
     ),
     cornerRadius = 14.dp,
@@ -891,15 +793,15 @@ private fun MiuixServerForm(
 ) {
   val clipboard = LocalClipboardManager.current
   val id = remember(existing?.id) { existing?.id ?: UUID.randomUUID().toString() }
-  var name by remember(existing?.id) { mutableStateOf(existing?.name ?: "") }
+  var name by rememberSaveable(existing?.id) { mutableStateOf(existing?.name ?: "") }
   var url by remember(existing?.id) { mutableStateOf(existing?.url ?: "") }
-  var username by remember(existing?.id) { mutableStateOf(existing?.username ?: "opencode") }
+  var username by rememberSaveable(existing?.id) { mutableStateOf(existing?.username ?: "opencode") }
   var password by remember(existing?.id) { mutableStateOf("") }
-  var companion by remember(existing?.id) { mutableStateOf(existing?.companionUrl ?: "") }
+  var companion by rememberSaveable(existing?.id) { mutableStateOf(existing?.companionUrl ?: "") }
   var pluginSecret by remember(existing?.id) { mutableStateOf(existing?.pluginSecret ?: "") }
-  var autoConnect by remember(existing?.id) { mutableStateOf(existing?.autoConnect ?: true) }
-  var notifications by remember(existing?.id) { mutableStateOf(existing?.notifications ?: true) }
-  var allowHttp by remember(existing?.id) { mutableStateOf(existing?.allowCleartext == true) }
+  var autoConnect by rememberSaveable(existing?.id) { mutableStateOf(existing?.autoConnect ?: true) }
+  var notifications by rememberSaveable(existing?.id) { mutableStateOf(existing?.notifications ?: true) }
+  var allowHttp by rememberSaveable(existing?.id) { mutableStateOf(existing?.allowCleartext == true) }
   var showAdvanced by remember { mutableStateOf(existing?.companionUrl?.isNotBlank() == true || existing?.allowCleartext == true) }
   var result by remember { mutableStateOf("") }
   var working by remember { mutableStateOf(false) }
@@ -964,6 +866,9 @@ private fun MiuixServerForm(
       }
     }
 
+    if (normalizedInput.startsWith("http://", true)) item {
+      SuperSwitch(title = "允许此地址使用 HTTP", summary = "请仅在你信任的网络中开启", checked = allowHttp, onCheckedChange = { allowHttp = it })
+    }
     if (!isPair) {
       item {
         TextField(
@@ -977,7 +882,7 @@ private fun MiuixServerForm(
         TextField(
           value = password,
           onValueChange = { text: String -> password = text },
-          label = if (existing == null) "访问密码" else "新密码（留空保持不变）",
+          label = if (existing == null) "访问密码（无认证服务器可留空）" else "新密码（留空保持不变）",
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
           visualTransformation = PasswordVisualTransformation(),
           modifier = Modifier.fillMaxWidth()
@@ -1027,16 +932,7 @@ private fun MiuixServerForm(
           onCheckedChange = { notifications = it }
         )
       }
-      if (normalizedInput.startsWith("http://", true)) {
-        item {
-          SuperSwitch(
-            title = "允许局域网明文 HTTP",
-            summary = "仅建议在受信任局域网环境下使用",
-            checked = allowHttp,
-            onCheckedChange = { allowHttp = it }
-          )
-        }
-      }
+
     }
 
     if (result.isNotBlank()) {
@@ -1063,9 +959,9 @@ private fun MiuixServerForm(
           onClick = {
             working = true
             val normalizedUrl = normalizedInput.trimEnd('/')
-            val profile = ServerProfile(
-              id, name.trim().ifBlank { "OpenCode" }, normalizedUrl, username.trim().ifBlank { "opencode" }, autoConnect, notifications,
-              companion.trim().trimEnd('/'), allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp, pluginSecret = pluginSecret.trim()
+            val profile = (existing ?: ServerProfile(id, "", "")).copy(
+              name = name.trim().ifBlank { "OpenCode" }, url = normalizedUrl, username = username.trim().ifBlank { "opencode" }, autoConnect = autoConnect, notifications = notifications,
+              companionUrl = companion.trim().trimEnd('/'), allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp, pluginSecret = pluginSecret.trim()
             )
             onSave(profile, password.takeIf { it.isNotBlank() || existing == null }) { message ->
               result = message
@@ -1073,7 +969,6 @@ private fun MiuixServerForm(
             }
           },
           enabled = !working && name.isNotBlank() &&
-              (isPair || existing != null || password.isNotBlank()) &&
               (normalizedInput.startsWith("https://", true) || (normalizedInput.startsWith("http://", true) && allowHttp)),
           modifier = Modifier.weight(2f),
           colors = ButtonDefaults.buttonColorsPrimary()
@@ -1089,8 +984,10 @@ private fun MiuixServerForm(
 fun SettingsScreen(
   state: LagoonState,
   controller: LagoonController,
-  dark: Boolean,
-  onDark: (Boolean) -> Unit,
+  themeMode: ThemeMode,
+  onTheme: (ThemeMode) -> Unit,
+  previewBack: Boolean,
+  onPreviewBack: (Boolean) -> Unit,
   onNotifications: () -> Unit,
   onManageServers: () -> Unit
 ) {
@@ -1098,15 +995,23 @@ fun SettingsScreen(
   val pushAvailable = remember(state.serverId) { PushRegistration(context).available() }
   // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
   var islandSupport by remember { mutableStateOf<List<IslandSupport>?>(null) }
-  LaunchedEffect(state.serverId, state.server?.islandHonor, state.server?.islandOppoFluidCloud) {
-    islandSupport = withContext(Dispatchers.IO) { IslandRegistry.diagnostics(context, state.server) }
+  val lifecycleOwner = LocalLifecycleOwner.current
+  val scope = rememberCoroutineScope()
+  fun refreshSupport() { scope.launch { islandSupport = withContext(Dispatchers.IO) { IslandRegistry.diagnostics(context, state.server) } } }
+  DisposableEffect(lifecycleOwner, state.serverId) {
+    val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refreshSupport() }
+    lifecycleOwner.lifecycle.addObserver(observer); refreshSupport()
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
+  val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
+  val clipboard = LocalClipboardManager.current
+
 
   LazyColumn(
     modifier = Modifier
       .fillMaxSize()
       .overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
+    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp)
   ) {
     item { MiuixSectionHeader("当前连接") }
@@ -1139,12 +1044,11 @@ fun SettingsScreen(
     item { MiuixSectionHeader("界面与系统") }
     item {
       Card {
-        SuperSwitch(
-          title = "深色模式 (Dark Theme)",
-          summary = "开启符合 MIUIX 规范的高对比深色表面与液体透光",
-          checked = dark,
-          onCheckedChange = onDark
-        )
+        Column(Modifier.padding(16.dp)) {
+          Text("外观", style = MiuixTheme.textStyles.headline2)
+          Row(Modifier.fillMaxWidth()) { ThemeMode.entries.forEach { mode -> SelectChip(mode.label, themeMode == mode) { onTheme(mode) } } }
+          SuperSwitch(title = "返回手势预览", summary = "拖动返回手势时轻微预览上一级页面", checked = previewBack, onCheckedChange = onPreviewBack)
+        }
       }
     }
 
@@ -1220,24 +1124,8 @@ fun SettingsScreen(
               Text("开启实时更新权限")
             }
           }
-          val current = state.server
-          if (current != null) {
-            Spacer(Modifier.height(14.dp))
-            Text("待合作通道开关（需厂商权限）", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-            Spacer(Modifier.height(6.dp))
-            SuperSwitch(
-              title = "荣耀灵动胶囊",
-              summary = "需荣耀开发者企业认证与白名单",
-              checked = current.islandHonor,
-              onCheckedChange = { controller.setIslandVendor(current.copy(islandHonor = it)) }
-            )
-            SuperSwitch(
-              title = "OPPO 流体云（ColorOS 15）",
-              summary = "需开放平台 serviceId；ColorOS 16 走标准通道",
-              checked = current.islandOppoFluidCloud,
-              onCheckedChange = { controller.setIslandVendor(current.copy(islandOppoFluidCloud = it)) }
-            )
-          }
+          Spacer(Modifier.height(14.dp))
+          Text("荣耀灵动胶囊、ColorOS 15 流体云暂未完成接入，当前不可用。", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
         }
       }
     }
@@ -1264,5 +1152,14 @@ fun SettingsScreen(
         }
       }
     }
+    item { MiuixSectionHeader("应用与诊断") }
+    item { Card(insideMargin = PaddingValues(16.dp)) {
+      Text("OpenCode Lagoon ${packageInfo.versionName} (${if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()})", style = MiuixTheme.textStyles.headline2)
+      Text("服务器接口：${state.protocol} · ${if (state.connected) "可连接" else "未连接"}\n实时同步：${if (state.streamConnected) "正常" else "恢复中"} · ${if (state.degraded || state.cached) "数据待更新" else "数据已同步"}", style = MiuixTheme.textStyles.footnote1)
+      TextButton(text = "复制诊断信息", onClick = {
+        clipboard.setText(AnnotatedString("OpenCode Lagoon ${packageInfo.versionName}\nAndroid ${android.os.Build.VERSION.RELEASE} / API ${android.os.Build.VERSION.SDK_INT}\n${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\nprotocol=${state.protocol}, api=${state.connected}, stream=${state.streamConnected}, stale=${state.degraded}, cached=${state.cached}\ncapabilitiesDocumented=${state.capabilities.documented}, sessions=${state.sessions.size}, messages=${state.messages.size}"))
+      })
+    } }
+
   }
 }

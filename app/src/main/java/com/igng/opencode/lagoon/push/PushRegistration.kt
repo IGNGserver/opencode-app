@@ -137,15 +137,14 @@ class LagoonMessagingService : FirebaseMessagingService() {
     val sessionId = data["sessionId"] ?: return
     val phase = runCatching { TaskPhase.valueOf(data["phase"] ?: "") }.getOrNull() ?: return
     val session = Session(sessionId, data["directory"].orEmpty(), data["title"].orEmpty().ifBlank { "OpenCode 任务" }, 0)
-    val state = TaskState(sessionId, phase, data["detail"].orEmpty())
+    val timestamp = data["ts"]?.toLongOrNull() ?: System.currentTimeMillis()
+    val previous = store.taskStates(profile.id)[sessionId]
+    val since = if (phase in TaskState.RUNNING_PHASES && previous?.active == false) timestamp else previous?.since ?: timestamp
+    val state = store.rememberTask(profile.id, TaskState(sessionId, phase, data["detail"].orEmpty(), since,
+      timestamp.takeIf { phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) }), observedAt = timestamp, durable = true)
     val notifications = TaskNotifications(this)
-    // Push notifications claim a separate id namespace so a server-delivered completion cannot be
-    // cancelled by the foreground service's per-session notification (and vice versa).
-    notifications.showPush(TaskNotifications.pushNotificationId(profile.id, sessionId), profile, session, state)
-    // Rebuild the island summary from the durable per-session phases and republish it, so the counts
-    // keep updating after the App process is killed (no controller is running to publish them).
-    store.recordPushPhase(profile.id, sessionId, phase.name, System.currentTimeMillis())
-    val summary = TaskSummary.fromPhaseNames(store.pushPhases(profile.id), store.acknowledgedTasks(profile.id))
+    notifications.show(profile, session, state)
+    val summary = TaskSummary.of(store.taskStates(profile.id), store.acknowledgedTasks(profile.id), store.taskParents(profile.id))
     notifications.showSummary(profile, summary, if (phase in TaskState.WAITING_PHASES) sessionId else null)
   }
 }

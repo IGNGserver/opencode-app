@@ -1,790 +1,153 @@
 package com.igng.opencode.lagoon.ui
 
-import androidx.compose.animation.*
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import android.content.Intent
 import androidx.compose.foundation.*
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.igng.opencode.lagoon.core.*
-import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.PressFeedbackType
-import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 private enum class ChatSheet { TODO, CHANGES, FILES, CHILDREN }
 
 @Composable
-fun ChatScreen(
-  state: LagoonState,
-  controller: LagoonController,
-  drafts: MutableMap<String, String>,
-  onBack: () -> Unit
-) {
+fun ChatScreen(state: LagoonState, controller: LagoonController, onBack: () -> Unit, onOpenChild: (String) -> Unit, onModal: (Boolean) -> Unit, interactive: Boolean = true) {
   val session = state.session
-
   var sheet by remember { mutableStateOf<ChatSheet?>(null) }
-  var menuSheet by remember { mutableStateOf(false) }
-  var rename by remember { mutableStateOf(false) }
-  var title by remember(session?.id) { mutableStateOf(session?.title ?: "") }
-  var delete by remember { mutableStateOf(false) }
-
-  state.savedPermissions?.let { rules ->
-    SuperDialog(
-      title = "已保存的项目权限",
-      show = true,
-      onDismissRequest = controller::closeSavedPermissions
-    ) {
-      Column(Modifier.padding(top = 8.dp)) {
-        if (rules.isEmpty()) {
-          Text("没有已保存规则", style = MiuixTheme.textStyles.body2)
-        }
-        rules.forEach { rule ->
-          Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-          ) {
-            Column(Modifier.weight(1f)) {
-              Text(rule.action, style = MiuixTheme.textStyles.headline2)
-              Text(rule.resource, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-            }
-            TextButton(
-              text = "撤销",
-              colors = ButtonDefaults.textButtonColors(
-                textColor = MiuixColorTokens.Error
-              ),
-              onClick = { controller.revokeSavedPermission(rule) }
-            )
-          }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-          TextButton(text = "关闭", onClick = controller::closeSavedPermissions)
-        }
-      }
-    }
-  }
-
+  var menu by remember { mutableStateOf(false) }
+  var rename by rememberSaveable { mutableStateOf(false) }
+  var title by rememberSaveable(session?.id) { mutableStateOf(session?.title.orEmpty()) }
+  var delete by rememberSaveable { mutableStateOf(false) }
+  var revertPicker by remember { mutableStateOf(false) }
+  var revertId by remember { mutableStateOf<String?>(null) }
+  var composerModal by remember { mutableStateOf(false) }
+  var requestModal by remember { mutableStateOf(false) }
+  val clipboard = LocalClipboardManager.current
+  val context = LocalContext.current
+  val uriHandler = LocalUriHandler.current
+  val modal = sheet != null || menu || rename || delete || revertPicker || composerModal || requestModal || state.sharedUrl != null || state.savedPermissions != null
+  DisposableEffect(modal) { onModal(modal); onDispose { onModal(false) } }
+  fun openFile(path: String) { sheet = ChatSheet.FILES; controller.readFile(path) }
   if (session == null) {
-    Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("会话未找到或已关闭", style = MiuixTheme.textStyles.title2)
-        Spacer(Modifier.height(8.dp))
-        Text("请返回会话列表重新选择或创建任务。", style = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        Spacer(Modifier.height(16.dp))
-        Button(
-          onClick = onBack,
-          colors = ButtonDefaults.buttonColorsPrimary()
-        ) {
-          Text("返回列表")
-        }
-      }
-    }
+    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) { Text("会话尚未加载或已关闭"); TextButton(text = "返回列表", onClick = onBack) }
     return
   }
-
   Column(Modifier.fillMaxSize()) {
-    // 顶部小标题栏：使用 MIUIX SmallTopAppBar 规范组件
-    SmallTopAppBar(
-      title = session.title,
-      navigationIcon = {
-        IconButton(onClick = onBack) {
-          Icon(
-            imageVector = MiuixIcons.Back,
-            contentDescription = "返回",
-            tint = MiuixTheme.colorScheme.onSurface
-          )
-        }
-      },
-      actions = {
-        state.tasks[session.id]?.let {
-          MiuixStatePill(it.phase, modifier = Modifier.padding(end = 4.dp))
-        }
-        IconButton(
-          onClick = { menuSheet = true },
-          modifier = Modifier.semantics { contentDescription = "更多操作" }
-        ) {
-          Icon(
-            imageVector = MiuixIcons.More,
-            contentDescription = "更多",
-            tint = MiuixTheme.colorScheme.onSurface
-          )
-        }
-      }
-    )
-
-    // 会话上下文摘要条：项目 · 服务器；待办 / 改动 / 子任务 / 文件是上下文入口（弹层），
-    // 不再与 Chat 平级分 Tab。Chat 始终是 Session 的主界面。
-    val contextLabel = listOfNotNull(
-      state.projects.firstOrNull { it.directory == session.directory }?.name
-        ?: session.directory.substringAfterLast('/').ifBlank { session.directory },
-      state.server?.name
-    ).joinToString(" · ")
-    Text(
-      text = contextLabel,
-      style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
-    )
-    val todoDone = state.todos.count { it.status == "completed" }
-    val additions = state.changes.sumOf { it.additions }
-    val deletions = state.changes.sumOf { it.deletions }
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .horizontalScroll(rememberScrollState())
-        .padding(horizontal = 16.dp, vertical = 4.dp),
-      horizontalArrangement = Arrangement.spacedBy(6.dp),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      MiuixActionCapsule(if (state.todos.isEmpty()) "待办" else "待办 $todoDone/${state.todos.size}") { sheet = ChatSheet.TODO }
-      if (state.protocol.supportsTodosAndDiff) {
-        MiuixActionCapsule(if (state.changes.isEmpty()) "改动" else "改动 +$additions −$deletions") { sheet = ChatSheet.CHANGES }
-      }
-      MiuixActionCapsule(if (state.children.isEmpty()) "子任务" else "子任务 ${state.children.size}") { sheet = ChatSheet.CHILDREN }
-      MiuixActionCapsule("📎 文件") {
-        sheet = ChatSheet.FILES
-        controller.listFiles()
-      }
+    SmallTopAppBar(title = state.title(session), navigationIcon = { IconButton(onClick = onBack) { Icon(MiuixIcons.Back, "返回上一级") } }, actions = { IconButton(onClick = { menu = true }) { Icon(MiuixIcons.More, "会话操作") } })
+    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text(listOfNotNull(resolveSessionProject(session, state.projects)?.name, state.server?.name).joinToString(" · "), modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2)
+      state.tasks[session.id]?.takeIf { it.phase != TaskPhase.IDLE }?.let { MiuixStatePill(it.phase) }
     }
-
-    // 主内容面板与底部输入舱
-    Box(Modifier.weight(1f).fillMaxWidth()) {
-      Conversation(
-        state,
-        controller,
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp)
-      )
-
-      Box(
-        modifier = Modifier
-          .align(Alignment.BottomCenter)
-          .fillMaxWidth()
-      ) {
-        MiuixChatComposer(state, controller, drafts)
-      }
+    Text(session.directory, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary), modifier = Modifier.padding(horizontal = 20.dp))
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+      if (state.capabilities.todos) TextButton(text = "待办 ${state.todos.size}", onClick = { sheet = ChatSheet.TODO })
+      if (state.capabilities.diff) TextButton(text = "改动 ${state.changes.size}", onClick = { sheet = ChatSheet.CHANGES })
+      TextButton(text = "子任务 ${state.children.size}", onClick = { sheet = ChatSheet.CHILDREN })
+      TextButton(text = "文件", onClick = { sheet = ChatSheet.FILES; controller.listFiles() })
     }
+    Conversation(state, controller, Modifier.weight(1f).fillMaxWidth(), ::openFile, { requestModal = it })
+    ChatComposer(state, controller, interactive) { composerModal = it }
   }
-
-  // 会话上下文详情弹层：待办 / 改动 / 子任务 / 文件
   sheet?.let { which ->
-    SuperBottomSheet(
-      title = when (which) {
-        ChatSheet.TODO -> "待办"
-        ChatSheet.CHANGES -> "改动"
-        ChatSheet.FILES -> "文件浏览"
-        ChatSheet.CHILDREN -> "子任务"
-      },
-      show = true,
-      onDismissRequest = { sheet = null }
-    ) {
-      Box(Modifier.fillMaxWidth().fillMaxHeight(0.72f)) {
+    val resource = when (which) { ChatSheet.TODO -> "todos"; ChatSheet.CHANGES -> "changes"; ChatSheet.FILES -> "files"; ChatSheet.CHILDREN -> "children" }
+    SuperBottomSheet(title = when (which) { ChatSheet.TODO -> "待办"; ChatSheet.CHANGES -> "代码改动"; ChatSheet.FILES -> "文件"; ChatSheet.CHILDREN -> "子任务" }, show = true, onDismissRequest = { sheet = null }) {
+      Column(Modifier.fillMaxWidth().fillMaxHeight(0.72f).padding(16.dp)) {
+        if (which != ChatSheet.FILES) ResourceHint(state.resource(resource), "暂无记录", retry = controller::reload)
         when (which) {
-          ChatSheet.TODO -> TodoPanel(state.todos, Modifier.fillMaxSize())
-          ChatSheet.CHANGES -> ChangesPanel(state.changes, Modifier.fillMaxSize())
-          ChatSheet.FILES -> FilesPanel(state, controller, onInsertRef = { ref ->
-            val key = "${state.serverId}:${state.sessionId}"
-            val current = drafts[key].orEmpty()
-            editDraft(drafts, key, if (current.isBlank()) "@$ref " else "$current @$ref ")
-            sheet = null
-          }, Modifier.fillMaxSize())
-          ChatSheet.CHILDREN -> ChildrenPanel(state.children, controller, Modifier.fillMaxSize())
-        }
-      }
-    }
-  }
-
-  // 会话管理操作底栏
-  if (menuSheet) {
-    SuperBottomSheet(
-      title = "会话管理",
-      show = menuSheet,
-      onDismissRequest = { menuSheet = false }
-    ) {
-      Column(
-        modifier = Modifier
-          .fillMaxWidth()
-          .padding(horizontal = 16.dp, vertical = 8.dp)
-          .navigationBarsPadding(),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-      ) {
-        if (state.protocol.supportsSessionActions) {
-          MiuixMenuActionItem("重命名会话", MiuixIcons.Edit) {
-            menuSheet = false
-            title = session.title
-            rename = true
-          }
-          if (state.supportsSavedPermissions) {
-            MiuixMenuActionItem("已保存权限", MiuixIcons.Lock) {
-              menuSheet = false
-              controller.loadSavedPermissions()
+          ChatSheet.TODO -> LazyColumn { items(state.todos) { todo -> Text("${if (todo.status == "completed") "✓" else "○"} ${todo.content}", modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) } }
+          ChatSheet.CHANGES -> LazyColumn { items(state.changes, key = { it.path }) { change ->
+            var expanded by rememberSaveable(change.path) { mutableStateOf(false) }
+            TextButton(text = "${change.path}  +${change.additions} −${change.deletions}", onClick = { expanded = !expanded })
+            if (expanded) VirtualText(change.patch.ifBlank { change.after })
+          } }
+          ChatSheet.FILES -> FilesPanel(state, controller) { path -> controller.addReference(path); sheet = null }
+          ChatSheet.CHILDREN -> LazyColumn { items(state.children, key = { it.id }) { child ->
+            Card(Modifier.fillMaxWidth().padding(bottom = 8.dp), insideMargin = PaddingValues(14.dp), onClick = { sheet = null; onOpenChild(child.id) }) {
+              Text(state.title(child)); state.tasks[child.id]?.let { MiuixStatePill(it.phase) }
             }
-          }
-          MiuixMenuActionItem("分支会话 (Fork)", MiuixIcons.VerticalSplit) {
-            menuSheet = false
-            controller.fork()
-          }
-          MiuixMenuActionItem("分享链接", MiuixIcons.Share) {
-            menuSheet = false
-            controller.share()
-          }
-        }
-
-        MiuixMenuActionItem("压缩与总结上下文", MiuixIcons.CloudFill) {
-          menuSheet = false
-          controller.summarize()
-        }
-        MiuixMenuActionItem("撤销到上一条消息", MiuixIcons.Undo) {
-          menuSheet = false
-          state.messages.lastOrNull()?.let { controller.revert(it.id) }
-        }
-        MiuixMenuActionItem("恢复撤销", MiuixIcons.Redo) {
-          menuSheet = false
-          controller.unrevert()
-        }
-        MiuixMenuActionItem("文件浏览", MiuixIcons.File) {
-          menuSheet = false
-          sheet = ChatSheet.FILES
-          controller.listFiles()
-        }
-
-        if (state.protocol.supportsSessionActions) {
-          Spacer(Modifier.height(4.dp))
-          MiuixMenuActionItem("删除会话", MiuixIcons.Delete, isDestructive = true) {
-            menuSheet = false
-            delete = true
-          }
+          } }
         }
       }
     }
   }
-
-  if (rename) {
-    SuperDialog(
-      title = "重命名会话",
-      show = rename,
-      onDismissRequest = { rename = false }
-    ) {
-      Column(Modifier.padding(top = 8.dp)) {
-        TextField(
-          value = title,
-          onValueChange = { title = it },
-          label = "新标题",
-          modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-          TextButton(text = "取消", onClick = { rename = false })
-          Spacer(Modifier.width(8.dp))
-          TextButton(
-            text = "保存",
-            colors = ButtonDefaults.textButtonColorsPrimary(),
-            onClick = {
-              controller.rename(title)
-              rename = false
-            }
-          )
-        }
-      }
+  if (menu) SuperBottomSheet(title = "会话操作", show = true, onDismissRequest = { menu = false }) {
+    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+      fun close(action: () -> Unit) { menu = false; action() }
+      if (state.capabilities.supports(SessionAction.RENAME)) TextButton(text = "重命名", onClick = { close { title = state.title(session); rename = true } })
+      if (state.supportsSavedPermissions) TextButton(text = "已保存的项目权限", onClick = { close { controller.loadSavedPermissions() } })
+      if (state.capabilities.supports(SessionAction.FORK)) TextButton(text = "从此会话创建分支", enabled = !state.pending("fork"), onClick = { close { controller.fork { onOpenChild(it.id) } } })
+      if (state.capabilities.supports(SessionAction.SHARE)) TextButton(text = "分享会话", enabled = !state.pending("share"), onClick = { close { controller.share() } })
+      if (state.capabilities.supports(SessionAction.COMPACT)) TextButton(text = "整理上下文", enabled = !state.pending("compact"), onClick = { close { controller.summarize() } })
+      if (state.capabilities.supports(SessionAction.REVERT)) TextButton(text = "选择撤销位置", onClick = { close { revertPicker = true; revertId = null } })
+      if (state.capabilities.supports(SessionAction.UNREVERT)) TextButton(text = "恢复撤销", enabled = !state.pending("unrevert"), onClick = { close { controller.unrevert() } })
+      if (state.capabilities.supports(SessionAction.DELETE)) TextButton(text = "删除会话", colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error), onClick = { close { delete = true } })
     }
   }
-
-  if (delete) {
-    SuperDialog(
-      title = "确定删除此会话？",
-      show = delete,
-      onDismissRequest = { delete = false }
-    ) {
-      Column(Modifier.padding(top = 8.dp)) {
-        Text("将从服务端永久移除该会话的所有消息历史记录与上下文。", style = MiuixTheme.textStyles.body1)
-        Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-          TextButton(text = "取消", onClick = { delete = false })
-          Spacer(Modifier.width(8.dp))
-          TextButton(
-            text = "彻底删除",
-            colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error),
-            onClick = {
-              controller.deleteSession()
-              delete = false
-              onBack()
-            }
-          )
-        }
-      }
+  if (rename) SuperDialog(title = "重命名会话", show = true, onDismissRequest = { if (!state.pending("rename")) rename = false }) {
+    Column { TextField(title, { title = it }, label = "会话名称", modifier = Modifier.fillMaxWidth()); ActionError(state, "rename")
+      Row { TextButton(text = "取消", onClick = { rename = false }); TextButton(text = if (state.pending("rename")) "保存中…" else "保存", enabled = !state.pending("rename") && title.isNotBlank(), onClick = { controller.rename(title) { rename = false } }) }
     }
   }
+  if (delete) SuperDialog(title = "删除此会话？", show = true, onDismissRequest = { if (!state.pending("delete")) delete = false }) {
+    Column { Text("会话消息将从服务器永久删除。\n${state.title(session)}"); ActionError(state, "delete")
+      Row { TextButton(text = "取消", onClick = { delete = false }); TextButton(text = if (state.pending("delete")) "删除中…" else "永久删除", enabled = !state.pending("delete"), colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error), onClick = { controller.deleteSession { delete = false; onBack() } }) }
+    }
+  }
+  if (revertPicker) SuperDialog(title = "选择撤销边界", show = true, onDismissRequest = { revertPicker = false }) {
+    Column { Text("将撤销所选用户消息及其后续修改，可通过“恢复撤销”恢复。", style = MiuixTheme.textStyles.footnote1)
+      LazyColumn(Modifier.heightIn(max = 280.dp)) { items(state.messages.filter { it.role == "user" && it.isDisplayable }, key = { it.id }) { message -> TextButton(text = (if (revertId == message.id) "✓ " else "") + message.parts.filter { it.type == "text" }.joinToString(" ") { it.text }.take(140), onClick = { revertId = message.id }) } }
+      ActionError(state, "revert"); TextButton(text = "撤销所选消息及后续修改", enabled = revertId != null && !state.pending("revert"), onClick = { revertId?.let { controller.revert(it) { revertPicker = false } } })
+    }
+  }
+  state.sharedUrl?.let { url -> SuperDialog(title = "分享链接", show = true, onDismissRequest = controller::closeShare) {
+    Column { Text(url); Row(Modifier.horizontalScroll(rememberScrollState())) {
+      TextButton(text = "复制", onClick = { clipboard.setText(AnnotatedString(url)) })
+      TextButton(text = "打开", onClick = { runCatching { uriHandler.openUri(url) } })
+      TextButton(text = "系统分享", onClick = { context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, url), "分享会话")) })
+    }
+      if (state.capabilities.supports(SessionAction.UNSHARE)) TextButton(text = "取消此链接的分享", enabled = !state.pending("unshare"), onClick = { controller.unshare() })
+    }
+  } }
+  state.savedPermissions?.let { rules -> SuperDialog(title = "已保存的项目权限", show = true, onDismissRequest = controller::closeSavedPermissions) {
+    Column { ResourceHint(state.resource("saved"), "没有已保存的权限规则", retry = { controller.loadSavedPermissions() })
+      LazyColumn(Modifier.heightIn(max = 360.dp)) { items(rules, key = { it.id }) { rule -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) { Text(rule.action); Text(rule.resource, style = MiuixTheme.textStyles.footnote2) }
+        TextButton(text = "撤销", enabled = !state.pending("revoke:${rule.id}"), onClick = { controller.revokeSavedPermission(rule) })
+      } } }
+    }
+  } }
 }
+@Composable
+private fun ActionError(state: LagoonState, action: String) { state.resource("action:$action").takeIf { it.state == ResourceState.ERROR }?.error?.let { Text(it, color = MiuixColorTokens.Error) } }
 
 @Composable
-private fun MiuixMenuActionItem(
-  title: String,
-  icon: androidx.compose.ui.graphics.vector.ImageVector,
-  isDestructive: Boolean = false,
-  onClick: () -> Unit
-) {
-  val contentColor = if (isDestructive) MiuixColorTokens.Error else MiuixTheme.colorScheme.onSurface
-  Card(
-    modifier = Modifier.fillMaxWidth(),
-    pressFeedbackType = PressFeedbackType.Sink,
-    showIndication = true,
-    insideMargin = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-    colors = CardDefaults.defaultColors(
-      color = if (isDestructive) MiuixColorTokens.ErrorSubtle else Color.Transparent
-    ),
-    onClick = onClick
-  ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Icon(
-        imageVector = icon,
-        contentDescription = null,
-        tint = contentColor,
-        modifier = Modifier.size(20.dp)
-      )
-      Spacer(Modifier.width(12.dp))
-      Text(
-        text = title,
-        style = MiuixTheme.textStyles.headline2.copy(
-          color = contentColor,
-          fontWeight = if (isDestructive) FontWeight.SemiBold else FontWeight.Normal
-        )
-      )
-    }
-  }
-}
-
-@Composable
-private fun Conversation(
-  state: LagoonState,
-  controller: LagoonController,
-  modifier: Modifier = Modifier,
-  contentPadding: PaddingValues = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp)
-) {
-  val list = rememberLazyListState()
-  val scope = rememberCoroutineScope()
-  val permissions = state.permissions.filter { it.sessionId == state.sessionId }
-  val questions = state.questions.filter { it.sessionId == state.sessionId }
-  val total = state.messages.size + permissions.size + questions.size
-
-  val contentKey = state.messages.lastOrNull()?.let { last ->
-    Triple(last.id, last.parts.size, last.parts.lastOrNull()?.text?.length ?: 0)
-  }
-
-  LaunchedEffect(state.sessionId, contentKey, total) {
-    if (total > 0) list.animateScrollToItem(total - 1)
-  }
-
-  val showScrollToBottom by remember {
-    derivedStateOf {
-      val layoutInfo = list.layoutInfo
-      val visibleItems = layoutInfo.visibleItemsInfo
-      if (visibleItems.isEmpty() || total <= 2) false
-      else visibleItems.last().index < total - 2
-    }
-  }
-
-  Box(modifier = modifier) {
-    LazyColumn(
-      modifier = Modifier
-        .fillMaxSize()
-        .overScrollVertical(),
-      state = list,
-      contentPadding = contentPadding,
-      verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-      if (state.messages.isEmpty() && permissions.isEmpty() && questions.isEmpty()) {
-        item {
-          Card(
-            insideMargin = PaddingValues(20.dp),
-            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainer)
-          ) {
-            Text("会话就绪", style = MiuixTheme.textStyles.title2.copy(fontWeight = FontWeight.Bold))
-            Spacer(Modifier.height(6.dp))
-            Text(
-              "在下方输入指令开始工作，或引用工程文件、使用快捷命令与专用 Agent。",
-              style = MiuixTheme.textStyles.body2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-            )
-          }
-        }
-      }
-      items(state.messages, key = { "message-${it.id}" }) { message -> MiuixMessageCard(message) }
-      items(permissions, key = { "permission-${it.id}" }) { MiuixPermissionCard(it, controller, state.supportsSavedPermissions) }
-      items(questions, key = { "question-${it.id}" }) { MiuixQuestionCard(it, controller) }
-    }
-
-    // 悬浮下滑 FAB 按钮 (MIUIX 风格纯色圆形卡片)
-    AnimatedVisibility(
-      visible = showScrollToBottom,
-      enter = fadeIn() + scaleIn(spring(stiffness = Spring.StiffnessMedium)),
-      exit = fadeOut() + scaleOut(),
-      modifier = Modifier
-        .align(Alignment.BottomEnd)
-        .padding(end = 16.dp, bottom = 148.dp)
-    ) {
-      Card(
-        modifier = Modifier
-          .size(42.dp)
-          .clickable(
-            interactionSource = remember { MutableInteractionSource() },
-            indication = null,
-            onClick = {
-              if (total > 0) {
-                scope.launch { list.animateScrollToItem(total - 1) }
-              }
-            }
-          ),
-        cornerRadius = 21.dp,
-        insideMargin = PaddingValues(0.dp),
-        colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainerHighest)
-      ) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = MiuixIcons.Back,
-            contentDescription = "回到底部",
-            tint = MiuixTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp).rotate(-90f)
-          )
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun MiuixMessageCard(message: Message) {
-  val isUser = message.role == "user"
-  Column(
-    modifier = Modifier.fillMaxWidth(),
-    horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
-  ) {
-    Text(
-      text = if (isUser) "你" else "OpenCode",
-      style = MiuixTheme.textStyles.footnote2.copy(
-        color = MiuixTheme.colorScheme.onSurfaceVariantActions,
-        fontWeight = FontWeight.Medium
-      ),
-      modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-    )
-
-    Card(
-      modifier = Modifier.fillMaxWidth(if (isUser) 0.90f else 1f),
-      cornerRadius = 16.dp,
-      insideMargin = PaddingValues(14.dp),
-      colors = CardDefaults.defaultColors(
-        color = if (isUser) MiuixColorTokens.PrimarySubtle else MiuixTheme.colorScheme.surfaceContainer
-      )
-    ) {
-      message.parts.forEach { part ->
-        MiuixMessagePart(part)
-      }
-      message.error?.let {
-        Text(
-          text = it,
-          color = MiuixColorTokens.Error,
-          style = MiuixTheme.textStyles.body2
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun MiuixMessagePart(part: MessagePart) {
-  when (part.type) {
-    "text" -> MarkdownText(part.text)
-    "reasoning" -> MiuixExpandableCard("💡 深度思考", part.text, defaultOpen = false)
-    "tool" -> MiuixToolTrace(part)
-    "file" -> MiuixInfoChip("文件路径", part.path.ifBlank { part.text })
-    "patch", "diff" -> MiuixExpandableCard(
-      "📝 代码变更",
-      part.patch.ifBlank { part.text }.ifBlank { part.output }.ifBlank { part.files.joinToString("\n") },
-      defaultOpen = false,
-      isDiff = true
-    )
-    "agent", "subtask", "task" -> MiuixInfoChip("子任务", part.text.ifBlank { part.title }.ifBlank { part.path })
-    "error" -> Text(part.error.ifBlank { part.text }.ifBlank { part.output }, color = MiuixColorTokens.Error)
-    "step-start", "step-finish", "snapshot", "compaction" -> Unit
-    else -> MiuixInfoChip(part.type.ifBlank { "内容" }, part.text.ifBlank { part.title })
-  }
-}
-
-/**
- * 工具调用默认是一行紧凑执行轨迹（Read / Edit / Bash …），点按才展开输入输出，
- * 不再为每次调用生成一张大卡片。
- */
-@Composable
-private fun MiuixToolTrace(part: MessagePart) {
-  val status = part.status.lowercase()
-  val failed = part.error.isNotBlank() || status in setOf("error", "failed")
-  val done = status in setOf("completed", "done", "success")
-  val accent = when {
-    failed -> MiuixColorTokens.Error
-    done -> MiuixColorTokens.Success
-    else -> MiuixColorTokens.Primary
-  }
-  var open by remember(part.id) { mutableStateOf(false) }
-  Surface(
-    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-    shape = miuixSquircleShape(10.dp),
-    color = MiuixTheme.colorScheme.secondaryContainer
-  ) {
-    Column {
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clickable { open = !open }
-          .padding(horizontal = 10.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically
-      ) {
-        Box(Modifier.size(6.dp).background(accent, CircleShape))
-        Spacer(Modifier.width(8.dp))
-        Text(
-          text = toolLabel(part.tool),
-          style = MiuixTheme.textStyles.footnote2.copy(color = accent, fontWeight = FontWeight.Bold)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-          text = toolSummary(part),
-          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary),
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          modifier = Modifier.weight(1f)
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-          text = if (open) "▾" else "▸",
-          fontSize = 11.sp,
-          color = MiuixTheme.colorScheme.onSurfaceVariantActions
-        )
-      }
-      if (open) {
-        HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine)
-        Column(
-          modifier = Modifier.fillMaxWidth().padding(10.dp),
-          verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-          ToolTraceBlock("输入", part.input)
-          ToolTraceBlock("输出", part.output)
-          ToolTraceBlock("错误", part.error, isError = true)
-          if (part.files.isNotEmpty()) {
-            Text(
-              text = "产出：" + part.files.joinToString("、"),
-              style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-            )
-          }
-          if (part.input.isBlank() && part.output.isBlank() && part.error.isBlank()) {
-            Text(
-              text = "无详细输入输出",
-              style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-            )
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun ToolTraceBlock(label: String, content: String, isError: Boolean = false) {
-  if (content.isBlank()) return
-  Surface(
-    modifier = Modifier.fillMaxWidth(),
-    shape = miuixSquircleShape(8.dp),
-    color = if (isError) MiuixColorTokens.ErrorSubtle else MiuixTheme.colorScheme.background
-  ) {
-    Column(Modifier.fillMaxWidth().padding(8.dp)) {
-      Text(
-        text = label,
-        style = MiuixTheme.textStyles.footnote2.copy(
-          color = if (isError) MiuixColorTokens.Error else MiuixTheme.colorScheme.primary,
-          fontWeight = FontWeight.Bold
-        )
-      )
-      Text(
-        text = content,
-        style = MiuixTheme.textStyles.footnote2.copy(fontFamily = FontFamily.Monospace)
-      )
-    }
-  }
-}
-
-private fun toolLabel(tool: String): String = when (tool.lowercase()) {
-  "read", "readfile", "read_file" -> "Read"
-  "edit", "write", "multiedit", "patch", "apply_patch", "writefile" -> "Edit"
-  "bash", "shell", "exec", "runcommand" -> "Bash"
-  "grep", "search", "glob", "list", "ls", "grepsearch", "codebase_search" -> "Search"
-  "task", "subagent", "agent", "dispatch_agent" -> "Task"
-  "webfetch", "websearch", "fetch" -> "Web"
-  "todowrite", "todoread", "todo" -> "Todo"
-  else -> tool.ifBlank { "工具" }
-}
-
-private fun toolSummary(part: MessagePart): String {
-  val direct = part.title.ifBlank { part.path }.ifBlank { part.text }
-  if (direct.isNotBlank()) return direct.replace('\n', ' ').take(120)
-  val match = Regex("\"(?:command|filePath|path|pattern|query|url|file|notebookPath)\"\\s*:\\s*\"([^\"]*)\"").find(part.input)
-  return match?.groupValues?.get(1)?.replace('\n', ' ')?.take(120)
-    ?: part.input.lineSequence().firstOrNull()?.trim()?.take(120).orEmpty()
-}
-
-@Composable
-private fun MiuixInfoChip(label: String, content: String) {
-  if (content.isBlank()) return
-  Surface(
-    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    shape = miuixSquircleShape(10.dp),
-    color = MiuixTheme.colorScheme.secondaryContainer
-  ) {
-    Column(Modifier.padding(10.dp)) {
-      Text(label, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.primary, fontWeight = FontWeight.Bold))
-      Text(content, style = MiuixTheme.textStyles.body2)
-    }
-  }
-}
-
-@Composable
-private fun MiuixExpandableCard(title: String, content: String, defaultOpen: Boolean, isDiff: Boolean = false) {
-  var open by remember(title, content.take(30)) { mutableStateOf(defaultOpen) }
-  Card(
-    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    pressFeedbackType = PressFeedbackType.Sink,
-    showIndication = true,
-    cornerRadius = 12.dp,
-    insideMargin = PaddingValues(0.dp),
-    colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
-  ) {
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .clickable { open = !open }
-        .padding(horizontal = 14.dp, vertical = 10.dp),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      Text(
-        text = if (open) "▾" else "▸",
-        color = MiuixTheme.colorScheme.primary,
-        fontSize = 14.sp,
-        fontWeight = FontWeight.Bold
-      )
-      Spacer(Modifier.width(8.dp))
-      Text(
-        text = title,
-        style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium),
-        modifier = Modifier.weight(1f)
-      )
-    }
-    if (open) {
-      HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine)
-      if (isDiff) {
-        MiuixDiffBlock(content)
-      } else {
-        Text(
-          text = content.ifBlank { "无输出详情" },
-          modifier = Modifier.fillMaxWidth().padding(12.dp),
-          style = MiuixTheme.textStyles.body2.copy(fontFamily = FontFamily.Monospace)
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun MiuixDiffBlock(diffText: String) {
-  val lines = remember(diffText) { diffText.lines() }
-  Column(
-    modifier = Modifier
-      .fillMaxWidth()
-      .horizontalScroll(rememberScrollState())
-      .background(MiuixTheme.colorScheme.background)
-      .padding(8.dp)
-  ) {
-    lines.forEach { line ->
-      val (bg, fg) = when {
-        line.startsWith("+") && !line.startsWith("+++") -> MiuixColorTokens.SuccessSubtle to MiuixColorTokens.Success
-        line.startsWith("-") && !line.startsWith("---") -> MiuixColorTokens.ErrorSubtle to MiuixColorTokens.Error
-        line.startsWith("@@") -> MiuixColorTokens.PrimarySubtle to MiuixTheme.colorScheme.primary
-        else -> Color.Transparent to MiuixTheme.colorScheme.onSurface
-      }
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .background(bg)
-          .padding(horizontal = 6.dp, vertical = 1.dp)
-      ) {
-        Text(
-          text = line,
-          fontFamily = FontFamily.Monospace,
-          fontSize = 12.sp,
-          color = fg,
-          softWrap = false
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun MarkdownText(markdown: String) {
-  val content = remember(markdown) {
-    buildAnnotatedString {
-      val lines = markdown.lines()
-      val lastIndex = lines.lastIndex
-      lines.forEachIndexed { index, line ->
-        val heading = line.startsWith('#')
-        val trimmed = if (heading) line.trimStart('#', ' ') else line
-        if (heading) {
-          withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontSize = 16.sp)) { append(trimmed) }
-        } else {
-          val chunks = trimmed.split("**")
-          chunks.forEachIndexed { i, chunk ->
-            if (i % 2 == 1) withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(chunk) } else append(chunk)
-          }
-        }
-        if (index != lastIndex) append('\n')
-      }
-    }
-  }
-  Text(
-    text = content,
-    style = MiuixTheme.textStyles.paragraph.copy(
-      color = MiuixTheme.colorScheme.onSurface
-    )
-  )
-}
-
-@Composable
-fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController, canSave: Boolean) {
-  var confirmSave by remember(request.id) { mutableStateOf(false) }
+fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController, canSave: Boolean, onModal: (Boolean) -> Unit = {}) {
+  val state by controller.state.collectAsState()
+  val pending = state.pending("permission:${request.id}")
+  var confirmSave by rememberSaveable(request.id) { mutableStateOf(false) }
+  DisposableEffect(confirmSave) { if (confirmSave) onModal(true); onDispose { if (confirmSave) onModal(false) } }
   if (confirmSave) {
     SuperDialog(
       title = "保存项目权限规则",
@@ -801,7 +164,7 @@ fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController
           TextButton(text = "取消", onClick = { confirmSave = false })
           Spacer(Modifier.width(8.dp))
           TextButton(
-            text = "保存并允许",
+            text = if (pending) "正在提交…" else "保存并允许", enabled = !pending,
             colors = ButtonDefaults.textButtonColorsPrimary(),
             onClick = {
               confirmSave = false
@@ -855,20 +218,20 @@ fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       Button(
-        onClick = { controller.replyPermission(request, "reject") },
+        onClick = { controller.replyPermission(request, "reject") }, enabled = !pending,
         colors = ButtonDefaults.buttonColors()
       ) {
         Text("拒绝")
       }
       Button(
-        onClick = { controller.replyPermission(request, "once") },
+        onClick = { controller.replyPermission(request, "once") }, enabled = !pending,
         colors = ButtonDefaults.buttonColorsPrimary()
       ) {
         Text("允许一次")
       }
       if (canSave && request.always.isNotEmpty()) {
         TextButton(
-          text = "始终允许",
+          text = "始终允许", enabled = !pending,
           onClick = { confirmSave = true }
         )
       }
@@ -878,8 +241,13 @@ fun MiuixPermissionCard(request: PermissionRequest, controller: LagoonController
 
 @Composable
 fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
-  var answers by remember(request) { mutableStateOf(request.questions.map { question -> question.defaultAnswers().filter { value -> question.options.any { it.value == value } } }) }
-  var custom by remember(request) { mutableStateOf(request.questions.map { question ->
+  val state by controller.state.collectAsState()
+  val pending = state.pending("question:${request.id}")
+  val answerSaver = remember(request.id) { Saver<List<List<String>>, String>(save = { rows -> org.json.JSONArray().apply { rows.forEach { put(org.json.JSONArray(it)) } }.toString() }, restore = { json ->
+    val rows = org.json.JSONArray(json); (0 until rows.length()).map { i -> val row = rows.getJSONArray(i); (0 until row.length()).map { row.optString(it) } }
+  }) }
+  var answers by rememberSaveable(request.id, request.questions.hashCode(), stateSaver = answerSaver) { mutableStateOf(request.questions.map { question -> question.defaultAnswers().filter { value -> question.options.any { it.value == value } } }) }
+  var custom by rememberSaveable(request.id, request.questions.hashCode()) { mutableStateOf(request.questions.map { question ->
     question.defaultAnswers().firstOrNull()?.takeIf { value -> question.options.none { it.value == value } }.orEmpty()
   }) }
   val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -959,7 +327,7 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
     Spacer(Modifier.height(12.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       Button(
-        onClick = { controller.rejectQuestion(request) },
+        onClick = { controller.rejectQuestion(request) }, enabled = !pending,
         colors = ButtonDefaults.buttonColors()
       ) {
         Text("取消")
@@ -971,505 +339,87 @@ fun MiuixQuestionCard(request: QuestionRequest, controller: LagoonController) {
             if (value.isBlank()) list else if (request.questions[index].multiple) list + value else listOf(value)
           })
         },
-        enabled = if (request.form) runCatching { formAnswer(request, answerRows) }.isSuccess else answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) },
+        enabled = !pending && (if (request.form) runCatching { formAnswer(request, answerRows) }.isSuccess else answers.indices.all { answers[it].isNotEmpty() || (request.questions[it].custom && custom[it].isNotBlank()) }),
         colors = ButtonDefaults.buttonColorsPrimary()
       ) {
-        Text("提交回答")
+        Text(if (pending) "正在提交…" else "提交回答")
       }
     }
   }
 }
 
-/**
- * 遵循 MIUIX 规范的对话输入舱 (Composer Dock)
- */
-@Composable
-private fun MiuixChatComposer(
-  state: LagoonState,
-  controller: LagoonController,
-  drafts: MutableMap<String, String>
-) {
-  val draftKey = "${state.serverId}:${state.sessionId}"
-  var filePicker by remember { mutableStateOf(false) }
-  var fileQuery by remember { mutableStateOf("") }
-  var commandPicker by remember { mutableStateOf(false) }
-  var modelSheet by remember { mutableStateOf(false) }
-  var agentSheet by remember { mutableStateOf(false) }
 
+@Composable
+private fun ChatComposer(state: LagoonState, controller: LagoonController, interactive: Boolean, onModal: (Boolean) -> Unit) {
+  var value by rememberSaveable(state.serverId, state.sessionId, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(state.draft)) }
+  var picker by remember { mutableStateOf<String?>(null) }
+  var command by rememberSaveable(state.serverId, state.sessionId) { mutableStateOf<String?>(null) }
+  var query by rememberSaveable { mutableStateOf("") }
+  LaunchedEffect(state.draft) { if (value.text != state.draft) value = TextFieldValue(state.draft, androidx.compose.ui.text.TextRange(state.draft.length)) }
+  DisposableEffect(picker) { onModal(picker != null); onDispose { onModal(false) } }
   val task = state.tasks[state.sessionId]
-  val waiting = task?.phase in TaskState.WAITING_PHASES
-  val running = task?.phase in TaskState.RUNNING_PHASES
-  val draft = drafts[draftKey].orEmpty()
-
-  // 位于底部的 MIUIX 交互舱
-  Column(
-    modifier = Modifier
-      .fillMaxWidth()
-      .padding(horizontal = 14.dp, vertical = 6.dp)
-      .navigationBarsPadding()
-  ) {
-    if (!state.connected) {
-      Text(
-        "离线模式 · 重新连接后将恢复交互",
-        color = MiuixColorTokens.Warning,
-        style = MiuixTheme.textStyles.footnote2,
-        modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
-      )
-    }
-    if (waiting) {
-      Text(
-        "请先审批上方的操作请求或回答问题",
-        color = MiuixColorTokens.Warning,
-        style = MiuixTheme.textStyles.footnote2,
-        modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
-      )
-    }
-
-    // 快捷胶囊工具栏
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .horizontalScroll(rememberScrollState())
-        .padding(bottom = 6.dp),
-      horizontalArrangement = Arrangement.spacedBy(6.dp),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      MiuixActionCapsule("📎 @文件") { filePicker = true }
-      if (state.commands.isNotEmpty()) {
-        MiuixActionCapsule("⚡ /命令") { commandPicker = true }
+  Column(Modifier.fillMaxWidth().background(MiuixTheme.colorScheme.surfaceContainer).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    if (state.cached && state.connected) Text("消息未同步，刷新后可发送", color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote2)
+    if (!state.connected) Text("离线 · 草稿保留，恢复连接后可发送", color = MiuixColorTokens.Warning, style = MiuixTheme.textStyles.footnote2)
+    if (state.pending("send")) Text("正在发送…", style = MiuixTheme.textStyles.footnote2)
+    state.references.forEach { ref -> Row(verticalAlignment = Alignment.CenterVertically) { Text(ref.path, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2); TextButton(text = "移除", onClick = { controller.removeReference(ref.path) }) } }
+    command?.let { name -> Row(verticalAlignment = Alignment.CenterVertically) { Text("/$name", Modifier.weight(1f), color = MiuixTheme.colorScheme.primary); TextButton(text = "取消命令", onClick = { command = null }) } }
+    Row(verticalAlignment = Alignment.Bottom) {
+      Box(Modifier.weight(1f).heightIn(min = 48.dp, max = 140.dp).padding(vertical = 10.dp)) {
+        if (value.text.isEmpty()) Text("输入任务…", color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+        BasicTextField(value, { next -> value = next; controller.updateDraft(next.text, state.serverId, state.sessionId) }, Modifier.fillMaxWidth(), textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface), cursorBrush = SolidColor(MiuixTheme.colorScheme.primary), maxLines = 5, readOnly = !interactive)
       }
-      MiuixActionCapsule("🤖 " + (state.agent ?: "默认 Agent")) { agentSheet = true }
-      MiuixActionCapsule("🧠 " + (state.model?.label ?: "默认模型")) { modelSheet = true }
-    }
-
-    // 输入舱核心 Surface (MIUIX 卡片质感)
-    Card(
-      modifier = Modifier.fillMaxWidth(),
-      cornerRadius = 20.dp,
-      insideMargin = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-      colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainerHighest)
-    ) {
-      Box(Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 130.dp)) {
-        if (draft.isEmpty()) {
-          Text(
-            "输入任务描述或向 Agent 提问…",
-            style = MiuixTheme.textStyles.body1.copy(
-              color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-            )
-          )
-        }
-        BasicTextField(
-          value = draft,
-          onValueChange = { editDraft(drafts, draftKey, it) },
-          modifier = Modifier.fillMaxWidth(),
-          textStyle = MiuixTheme.textStyles.body1.copy(color = MiuixTheme.colorScheme.onSurface),
-          cursorBrush = androidx.compose.ui.graphics.SolidColor(MiuixTheme.colorScheme.primary),
-          maxLines = 5
-        )
-      }
-
-      Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.End
-      ) {
-        if (running) {
-          Button(
-            onClick = controller::abort,
-            colors = ButtonDefaults.buttonColors(color = MiuixColorTokens.ErrorSubtle)
-          ) {
-            Text("停止", color = MiuixColorTokens.Error)
-          }
-        } else {
-          Button(
-            onClick = {
-              val text = draft.trim()
-              val submittedRevision = drafts["revision:$draftKey"]
-              controller.send(text) {
-                if (drafts["revision:$draftKey"] == submittedRevision) editDraft(drafts, draftKey, "")
-              }
-            },
-            enabled = state.connected && !state.cached && !waiting && !running && draft.isNotBlank(),
-            colors = ButtonDefaults.buttonColorsPrimary()
-          ) {
-            Text("发送 ↑")
-          }
-        }
-      }
-    }
-  }
-
-  // 引用文件弹窗
-  if (filePicker) {
-    SuperDialog(
-      title = "引用工程文件 (@file)",
-      show = filePicker,
-      onDismissRequest = { filePicker = false }
-    ) {
-      Column(Modifier.padding(top = 8.dp)) {
-        TextField(
-          value = fileQuery,
-          onValueChange = { text: String ->
-            fileQuery = text
-            if (text.length >= 2) controller.searchFiles(text)
-          },
-          useLabelAsPlaceholder = true,
-          label = "搜索工程文件名…",
-          modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(Modifier.heightIn(max = 240.dp)) {
-          val items = if (fileQuery.isNotBlank()) state.searchResults else state.files.map { it.path }
-          if (items.isEmpty()) {
-            item {
-              Text("无匹配文件", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary), modifier = Modifier.padding(8.dp))
-            }
-          }
-          items(items.take(15)) { path ->
-            Row(
-              modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                  editDraft(drafts, draftKey, if (draft.isBlank()) "@$path " else "$draft @$path ")
-                  filePicker = false
-                }
-                .padding(vertical = 10.dp, horizontal = 6.dp),
-              verticalAlignment = Alignment.CenterVertically
-            ) {
-              Icon(imageVector = MiuixIcons.File, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(Modifier.width(8.dp))
-              Text(path, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.body2)
-            }
-          }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-          TextButton(text = "关闭", onClick = { filePicker = false })
-        }
-      }
-    }
-  }
-
-  // 快捷命令弹窗
-  if (commandPicker) {
-    SuperDialog(
-      title = "选择快捷命令",
-      show = commandPicker,
-      onDismissRequest = { commandPicker = false }
-    ) {
-      LazyColumn(Modifier.heightIn(max = 260.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        items(state.commands) { cmd ->
-          Card(
-            modifier = Modifier.fillMaxWidth(),
-            insideMargin = PaddingValues(10.dp),
-            onClick = {
-              editDraft(drafts, draftKey, "/${cmd.name} ")
-              commandPicker = false
-            }
-          ) {
-            Text("/${cmd.name}", style = MiuixTheme.textStyles.headline2.copy(color = MiuixTheme.colorScheme.primary, fontWeight = FontWeight.Bold))
-            if (cmd.description.isNotBlank()) {
-              Text(cmd.description, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // 模型选择
-  if (modelSheet) {
-    SuperBottomSheet(
-      title = "选择 AI 模型",
-      show = modelSheet,
-      onDismissRequest = { modelSheet = false }
-    ) {
-      Column(
-        modifier = Modifier
-          .fillMaxWidth()
-          .padding(horizontal = 16.dp, vertical = 8.dp)
-          .navigationBarsPadding()
-      ) {
-        LazyColumn(Modifier.heightIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-          item {
-            MiuixMenuActionItem("服务器默认模型", MiuixIcons.All) {
-              controller.chooseModel(null)
-              modelSheet = false
-            }
-          }
-          items(state.models) { model ->
-            MiuixMenuActionItem("${model.providerId} · ${model.label}", MiuixIcons.MindMap) {
-              controller.chooseModel(model)
-              modelSheet = false
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Agent 选择
-  if (agentSheet) {
-    SuperBottomSheet(
-      title = "选择专用 Agent",
-      show = agentSheet,
-      onDismissRequest = { agentSheet = false }
-    ) {
-      Column(
-        modifier = Modifier
-          .fillMaxWidth()
-          .padding(horizontal = 16.dp, vertical = 8.dp)
-          .navigationBarsPadding()
-      ) {
-        LazyColumn(Modifier.heightIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-          item {
-            MiuixMenuActionItem("默认 Agent 体系", MiuixIcons.All) {
-              controller.chooseAgent(null)
-              agentSheet = false
-            }
-          }
-          items(state.agents) { agent ->
-            MiuixMenuActionItem(agent.name + if (agent.description.isNotBlank()) " (${agent.description})" else "", MiuixIcons.Tasks) {
-              controller.chooseAgent(agent.name)
-              agentSheet = false
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun MiuixActionCapsule(
-  label: String,
-  onClick: () -> Unit
-) {
-  Card(
-    modifier = Modifier.clickable(
-      interactionSource = remember { MutableInteractionSource() },
-      indication = null,
-      onClick = onClick
-    ),
-    cornerRadius = 14.dp,
-    insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-    colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
-  ) {
-    Text(
-      text = label,
-      style = MiuixTheme.textStyles.footnote2.copy(
-        color = MiuixTheme.colorScheme.onSurface,
-        fontWeight = FontWeight.Medium
-      )
-    )
-  }
-}
-
-@Composable
-private fun TodoPanel(todos: List<TodoItem>, modifier: Modifier = Modifier) {
-  LazyColumn(
-    modifier = modifier.overScrollVertical(),
-    contentPadding = PaddingValues(16.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp)
-  ) {
-    if (todos.isEmpty()) {
-      item {
-        MiuixEmptyStateCard("暂无待办事项", "当前会话尚未生成待办计划或执行任务。")
-      }
-    }
-    items(todos) { todo ->
-      Card(insideMargin = PaddingValues(14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Icon(
-            imageVector = if (todo.status == "completed") MiuixIcons.Ok else MiuixIcons.Alarm,
-            contentDescription = null,
-            tint = if (todo.status == "completed") MiuixColorTokens.Success else MiuixTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp)
-          )
-          Spacer(Modifier.width(10.dp))
-          Text(todo.content, modifier = Modifier.weight(1f), style = MiuixTheme.textStyles.body2)
-          Text(
-            todo.priority,
-            style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-          )
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun ChangesPanel(changes: List<FileChange>, modifier: Modifier = Modifier) {
-  LazyColumn(
-    modifier = modifier.overScrollVertical(),
-    contentPadding = PaddingValues(16.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp)
-  ) {
-    if (changes.isEmpty()) {
-      item {
-        MiuixEmptyStateCard("暂无文件改动", "任务执行中的代码变更与补丁差异将在此记录。")
-      }
-    }
-    items(changes) { change ->
-      var open by remember(change.path) { mutableStateOf(false) }
-      Card(
-        modifier = Modifier.fillMaxWidth(),
-        insideMargin = PaddingValues(14.dp),
-        onClick = { open = !open }
-      ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Text(
-            change.path,
-            modifier = Modifier.weight(1f),
-            style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium)
-          )
-          Text("+${change.additions}", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixColorTokens.Success))
-          Spacer(Modifier.width(6.dp))
-          Text("-${change.deletions}", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixColorTokens.Error))
-        }
-        if (open) {
-          Spacer(Modifier.height(10.dp))
-          MiuixDiffBlock(change.patch.ifBlank { change.after }.ifBlank { "无改动详情" })
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun FilesPanel(
-  state: LagoonState,
-  controller: LagoonController,
-  onInsertRef: (String) -> Unit,
-  modifier: Modifier = Modifier
-) {
-  val clipboard = LocalClipboardManager.current
-  var query by remember { mutableStateOf("") }
-
-  Column(modifier.padding(16.dp)) {
-    TextField(
-      value = query,
-      onValueChange = { text: String ->
-        query = text
-        if (text.length >= 2) controller.searchFiles(text)
-      },
-      useLabelAsPlaceholder = true,
-      label = "搜索工程目录文件…",
-      modifier = Modifier.fillMaxWidth(),
-      leadingIcon = {
-        Icon(imageVector = MiuixIcons.Search, contentDescription = null, modifier = Modifier.padding(horizontal = 8.dp))
-      }
-    )
-    Spacer(Modifier.height(8.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      TextButton(
-        text = "‹ 返回上级",
-        onClick = { controller.listFiles(state.filePath.substringBeforeLast('/', ".")) }
-      )
       Spacer(Modifier.width(8.dp))
-      Text(
-        state.filePath,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-      )
+      if (task?.phase in TaskState.RUNNING_PHASES) TextButton(text = "停止", enabled = !state.pending("abort"), onClick = { controller.abort() }, colors = ButtonDefaults.textButtonColors(textColor = MiuixColorTokens.Error))
+      else Button(enabled = state.connected && !state.cached && task?.active != true && !state.pending("send") && (value.text.isNotBlank() || state.references.isNotEmpty()), onClick = {
+        val draft = value.text
+        val submitted = command?.let { "/$it $draft" } ?: draft
+        controller.send(submitted, state.serverId, state.sessionId) { if (value.text == draft) { controller.updateDraft(""); value = TextFieldValue(""); command = null } }
+      }, colors = ButtonDefaults.buttonColorsPrimary()) { Text("发送") }
     }
-    HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine, modifier = Modifier.padding(vertical = 4.dp))
-
-    if (state.fileBinary) {
-      Text(
-        "此文件为二进制格式，暂不支持在移动端直接预览。",
-        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        style = MiuixTheme.textStyles.body2,
-        modifier = Modifier.padding(vertical = 16.dp)
-      )
-    } else if (state.fileText != null) {
-      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(
-          onClick = { onInsertRef(state.filePath) },
-          colors = ButtonDefaults.buttonColorsPrimary()
-        ) {
-          Text("引用到对话")
-        }
-        Button(
-          onClick = {
-            clipboard.setText(AnnotatedString(state.fileText ?: ""))
-          },
-          colors = ButtonDefaults.buttonColors()
-        ) {
-          Text("复制全文")
-        }
-      }
-      Spacer(Modifier.height(10.dp))
-      Text(
-        text = state.fileText ?: "",
-        modifier = Modifier
-          .fillMaxSize()
-          .verticalScroll(rememberScrollState())
-          .horizontalScroll(rememberScrollState()),
-        fontFamily = FontFamily.Monospace,
-        fontSize = 12.sp,
-        style = MiuixTheme.textStyles.body2
-      )
-    } else {
-      LazyColumn(
-        modifier = Modifier.overScrollVertical(),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-      ) {
-        val results = if (query.isNotBlank()) state.searchResults.map { FileNode(it, "file") } else state.files
-        items(results) { node ->
-          Card(
-            insideMargin = PaddingValues(12.dp),
-            onClick = {
-              if (node.type == "directory") controller.listFiles(node.path) else controller.readFile(node.path)
-            }
-          ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Icon(
-                imageVector = if (node.type == "directory") MiuixIcons.Folder else MiuixIcons.File,
-                contentDescription = null,
-                tint = if (node.type == "directory") MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantActions,
-                modifier = Modifier.size(20.dp)
-              )
-              Spacer(Modifier.width(10.dp))
-              Text(
-                node.path.substringAfterLast('/'),
-                style = MiuixTheme.textStyles.body2,
-                modifier = Modifier.weight(1f)
-              )
-            }
-          }
-        }
-      }
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+      IconButton(enabled = !state.pending("send"), onClick = { query = ""; controller.listFiles(); picker = "files" }) { Icon(MiuixIcons.Add, "添加文件引用") }
+      TextButton(text = "命令", enabled = state.commands.isNotEmpty() && !state.pending("send"), onClick = { picker = "commands" })
+      TextButton(text = state.agent ?: "默认 Agent", enabled = !state.pending("send"), onClick = { picker = "agents" })
+      TextButton(text = state.model?.label ?: "默认模型", enabled = !state.pending("send"), onClick = { picker = "models" })
     }
+    ActionError(state, "send")
   }
+  picker?.let { which -> SuperBottomSheet(title = when (which) { "files" -> "引用文件"; "commands" -> "选择命令"; "agents" -> "选择 Agent"; else -> "选择模型" }, show = true, onDismissRequest = { picker = null }) {
+    Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(16.dp)) {
+      if (which == "files") {
+        TextField(query, { query = it; controller.searchFiles(it) }, label = "搜索文件（至少两个字符）", modifier = Modifier.fillMaxWidth())
+        val resource = if (query.length >= 2) "search" else "files"
+        ResourceHint(state.resource(resource), "没有匹配文件", retry = { if (query.length >= 2) controller.searchFiles(query) else controller.listFiles() })
+      } else if (which != "commands") ResourceHint(state.resource(if (which == "agents") "agents" else "models"), "没有可选项", retry = controller::reload)
+      LazyColumn {
+        when (which) {
+          "files" -> {
+            val nodes = if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files
+            items(nodes, key = { it.path }) { node -> TextButton(text = (if (node.type == "directory") "目录 · " else "") + node.path, onClick = {
+              if (node.type == "directory") controller.listFiles(node.path) else { controller.addReference(node.path); picker = null }
+            }) }
+          }
+          "commands" -> items(state.commands, key = { it.name }) { cmd -> TextButton(text = "/${cmd.name} · ${cmd.description}", onClick = { command = cmd.name; picker = null }) }
+          "agents" -> { item { TextButton(text = "沿用会话当前配置", onClick = { controller.chooseAgent(null); picker = null }) }; items(state.agents, key = { it.name }) { agent -> TextButton(text = agent.name + " · " + agent.description, onClick = { controller.chooseAgent(agent.name); picker = null }) } }
+          else -> { item { TextButton(text = "沿用会话当前配置", onClick = { controller.chooseModel(null); picker = null }) }; items(state.models, key = { "${it.providerId}:${it.modelId}" }) { model -> TextButton(text = "${model.providerId} · ${model.label}", onClick = { controller.chooseModel(model); picker = null }) } }
+        }
+      }
+    }
+  } }
 }
 
 @Composable
-private fun ChildrenPanel(children: List<Session>, controller: LagoonController, modifier: Modifier = Modifier) {
-  LazyColumn(
-    modifier = modifier.overScrollVertical(),
-    contentPadding = PaddingValues(16.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp)
-  ) {
-    if (children.isEmpty()) {
-      item {
-        MiuixEmptyStateCard("无派生子任务", "当前会话尚未衍生出并行的 Subagent 子任务。")
-      }
-    }
-    items(children) { child ->
-      Card(
-        insideMargin = PaddingValues(14.dp),
-        onClick = { controller.selectSession(child.id) }
-      ) {
-        Text(child.title, style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
-        Spacer(Modifier.height(4.dp))
-        Text(
-          "切换到此子任务会话 ›",
-          style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.primary)
-        )
-      }
-    }
+private fun FilesPanel(state: LagoonState, controller: LagoonController, onReference: (String) -> Unit) {
+  var query by rememberSaveable { mutableStateOf("") }
+  val clipboard = LocalClipboardManager.current
+  Column(Modifier.fillMaxSize()) {
+    TextField(query, { query = it; controller.searchFiles(it) }, label = "搜索工程文件", modifier = Modifier.fillMaxWidth())
+    Row(verticalAlignment = Alignment.CenterVertically) { TextButton(text = "上一级", onClick = { controller.listFiles(state.filePath.substringBeforeLast('/', ".")) }); Text(state.filePath, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MiuixTheme.textStyles.footnote2) }
+    ResourceHint(state.resource(if (query.length >= 2) "search" else "files"), "此目录没有文件", retry = { if (query.length >= 2) controller.searchFiles(query) else controller.listFiles() })
+    if (state.fileBinary) { Text("当前无法预览此二进制文件"); TextButton(text = "引用文件", enabled = !state.pending("send"), onClick = { onReference(state.filePath) }) }
+    state.fileText?.let { text -> Row { TextButton(text = "引用文件", onClick = { onReference(state.filePath) }); TextButton(text = "复制全文", onClick = { clipboard.setText(AnnotatedString(text)) }) }; VirtualText(text, Modifier.weight(1f)) }
+      ?: LazyColumn { items(if (query.length >= 2) state.searchResults.map { FileNode(it, "file") } else state.files, key = { it.path }) { node -> TextButton(text = (if (node.type == "directory") "目录 · " else "") + node.path, onClick = { if (node.type == "directory") controller.listFiles(node.path) else controller.readFile(node.path) }) } }
   }
 }
 

@@ -53,14 +53,14 @@ class ControllerRegressionTest {
     put(c,"mutable", mutable); put(c,"state",mutable); put(c,"generation",1); put(c,"api",api)
     put(c,"operationScope",CoroutineScope(SupervisorJob()+Dispatchers.Unconfined))
     put(c,"scope",CoroutineScope(Job().apply { cancel() }+Dispatchers.Default))
-    put(c,"store",ServerStore(context));put(c,"cache",OfflineCache(context.getSharedPreferences("cache",0),{it},{it}));put(c,"sendMutex",kotlinx.coroutines.sync.Mutex())
+    put(c,"store",ServerStore(preferences(),preferences(),{it},{it}));put(c,"cache",OfflineCache(context.getSharedPreferences("cache",0),{it},{it}));put(c,"sendMutex",kotlinx.coroutines.sync.Mutex()); put(c,"referenceMutex",kotlinx.coroutines.sync.Mutex()); put(c,"observedTerminal",mutableMapOf<String,Long>()); put(c,"draftWrites",mutableMapOf<String,Job>())
     return c to mutable
   }
   private fun api(s:MockWebServer) = OpenCodeApi(ServerProfile("server","Server",s.url("/").toString(),allowCleartext=true), "fixture")
-  private suspend fun refresh(c:LagoonController) = suspendCoroutine<Unit> { cont ->
+  private suspend fun refresh(c:LagoonController, controlOnly:Boolean = true) = suspendCoroutine<Unit> { cont ->
     try {
       val m = LagoonController::class.java.getDeclaredMethod("loadAll", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Continuation::class.java).apply{isAccessible=true}
-      val result=m.invoke(c,1,true,cont)
+      val result=m.invoke(c,1,controlOnly,cont)
       if(result !== COROUTINE_SUSPENDED) cont.resume(Unit)
     }catch(e:Throwable){cont.resumeWithException(e.cause?:e)}
   }
@@ -118,7 +118,7 @@ class ControllerRegressionTest {
         }; return MockResponse().setBody(body)
       }}
       val(c,state)=controller(api(s),LagoonState(serverId="server",connected=true,projects=listOf(Project("a","/a","A"),Project("b","/b","B")),projectId="a",sessions=listOf(Session("sa","/a","A",0)),sessionId="sa",tasks=mapOf("sa" to TaskState("sa",TaskPhase.THINKING))))
-      refresh(c)
+      refresh(c, controlOnly=false)
       assertTrue(state.value.degraded);assertTrue(state.value.sessions.any{it.id=="sa"});assertEquals(TaskPhase.THINKING,state.value.tasks["sa"]?.phase);assertEquals("sa",state.value.sessionId)
     }
   }
@@ -178,6 +178,87 @@ class ControllerRegressionTest {
       refresh(controller)
       assertTrue(state.value.cached); assertTrue(state.value.connected)
     }
+  }
+
+
+  @Test fun outgoingComposerCannotWriteOrSendIntoAnotherSession() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
+      val api = api(server); api.health()
+      val (controller, state) = controller(api, LagoonState(serverId="server", connected=true,
+        sessions=listOf(Session("new", "/repo", "New", 0)), sessionId="new", draft="new draft"))
+      controller.updateDraft("outgoing draft", "server", "old")
+      controller.send("outgoing prompt", "server", "old").join()
+      assertEquals("new draft", state.value.draft)
+      assertEquals(1, server.requestCount)
+    }
+  }
+  @Test fun firstPromptFailureKeepsCreatedSessionDraftAndOldConfiguration() = runBlocking {
+    MockWebServer().use { server ->
+      server.dispatcher = object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
+        "/global/health" -> MockResponse().setBody("""{"healthy":true}""")
+        "/session" -> MockResponse().setBody("""{"id":"created","directory":"/repo","title":"","time":{}}""")
+        "/session/created/prompt_async" -> MockResponse().setResponseCode(500)
+        else -> MockResponse().setBody("[]")
+      } }
+      val api = api(server); api.health()
+      val (controller, state) = controller(api, LagoonState(serverId="server", protocol=ServerProtocol.V1, connected=true,
+        projects=listOf(Project("project", "/repo", "Repo")), projectId="project",
+        sessions=listOf(Session("old", "/repo", "Old", 0)), sessionId="old", agent="previous"))
+      val store=LagoonController::class.java.getDeclaredField("store").apply { isAccessible=true }.get(controller) as ServerStore
+      store.rememberConfiguration("server", "old", SessionConfiguration("previous", agentChanged=true))
+      var opened=0
+      controller.startSession("", "retry this prompt", "build") { opened++ }.join()
+      withTimeout(3_000) { while (state.value.pending("send")) delay(10) }
+      assertEquals(1, opened)
+      assertEquals("created", state.value.sessionId)
+      assertEquals("retry this prompt", state.value.draft)
+      assertEquals("retry this prompt", store.draft("server", "created"))
+      assertEquals("previous", store.configuration("server", "old").agent)
+      assertTrue(store.configuration("server", "old").agentChanged)
+      assertEquals(ResourceState.ERROR, state.value.resource("action:send").state)
+      val requests=List(server.requestCount) { server.takeRequest() }
+      assertEquals(1, requests.count { it.method == "POST" && it.requestUrl!!.encodedPath == "/session" })
+      assertEquals("build", org.json.JSONObject(requests.single { it.requestUrl!!.encodedPath.endsWith("prompt_async") }.body.readUtf8()).getString("agent"))
+    }
+  }
+  @Test fun rejectedDeleteKeepsSessionAndDoesNotNavigateAway() = runBlocking {
+    MockWebServer().use { server ->
+      server.enqueue(MockResponse().setBody("""{"healthy":true}""")); server.enqueue(MockResponse().setResponseCode(500))
+      val api = api(server); api.health()
+      val (controller, state)=controller(api, LagoonState(serverId="server", connected=true,
+        sessions=listOf(Session("s", "/repo", "Task", 0)), sessionId="s"))
+      var navigated=false
+      controller.deleteSession { navigated=true }.join()
+      assertFalse(navigated); assertEquals("s", state.value.sessionId)
+      assertEquals(1, state.value.sessions.size)
+      assertEquals(ResourceState.ERROR, state.value.resource("action:delete").state)
+    }
+  }
+  @Test fun notificationTargetOutsideFirstPageResolvesItsParentChain() = runBlocking {
+    MockWebServer().use { server ->
+      server.dispatcher=object: Dispatcher() { override fun dispatch(request: RecordedRequest) = when(request.requestUrl!!.encodedPath) {
+        "/global/health" -> MockResponse().setBody("""{"healthy":true}""")
+        "/session/old-child" -> MockResponse().setBody("""{"id":"old-child","parentID":"old-parent","directory":"/repo","time":{}}""")
+        "/session/old-parent" -> MockResponse().setBody("""{"id":"old-parent","directory":"/repo","time":{}}""")
+        else -> MockResponse().setResponseCode(404)
+      } }
+      val api=api(server);api.health()
+      val (controller,state)=controller(api,LagoonState(serverId="server", connected=true,
+        projects=listOf(Project("p","/repo","Repo")),projectId="p",sessionCursors=mapOf("/repo" to "older")))
+      var lineage=emptyList<String>()
+      controller.resolveSession("old-child") { lineage=it }.join()
+      assertEquals(listOf("old-parent","old-child"),lineage)
+      assertEquals("old-parent",state.value.parents["old-child"])
+      assertTrue(state.value.sessions.any { it.id=="old-parent" })
+    }
+  }
+  @Test fun pendingOperationsBelongToTheirSessionOrApprovalRequest() {
+    val key=operationKey("server","a","project","send")
+    val state=LagoonState(serverId="server",sessionId="b",projectId="project",pendingOperations=setOf(key,operationKey("server","a","project","permission:approval")))
+    assertFalse(state.pending("send"))
+    assertTrue(state.pending("permission:approval"))
+    assertFalse(state.pending("permission:another"))
   }
 
 }

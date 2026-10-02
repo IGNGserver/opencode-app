@@ -8,7 +8,6 @@ import android.os.Build
 import android.os.IBinder
 import com.igng.opencode.lagoon.core.LagoonController
 import com.igng.opencode.lagoon.core.ServerStore
-import com.igng.opencode.lagoon.core.Session
 import com.igng.opencode.lagoon.core.TaskPhase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +28,6 @@ class TaskMonitorService : Service() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var monitor: Job? = null
   private val tracked = linkedSetOf<Pair<String, String>>()
-  private val lastShown = HashMap<Pair<String, String>, Pair<TaskPhase, String>>()
   override fun onBind(intent: Intent?): IBinder? = null
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val serverId = intent?.getStringExtra("serverId") ?: run { stopSelf(); return START_NOT_STICKY }
@@ -37,9 +35,6 @@ class TaskMonitorService : Service() {
     val profile = ServerStore(this).profiles().firstOrNull { it.id == serverId } ?: run { stopSelf(); return START_NOT_STICKY }
     val notifications = TaskNotifications(this)
     tracked += serverId to sessionId
-    // A dedicated monitoring notification; kept separate from per-session results so stopping the
-    // foreground state never cancels a real completion/failure notification, and so the foreground
-    // placeholder is not left behind under a session-specific id.
     val controller = LagoonController.get(this)
     // A dedicated monitoring notification whose text mirrors the island summary; kept separate from
     // per-session results so stopping the foreground state never cancels a real completion/failure
@@ -61,27 +56,14 @@ class TaskMonitorService : Service() {
             // This service monitors only the current connection. Switching or removing a profile
             // drops its local tracking; independent companion pushes remain available.
             if (trackedServerId != state.serverId || state.profiles.none { it.id == trackedServerId && it.notifications } ||
-              state.connected && !state.degraded && state.sessions.none { it.id == trackedSessionId }) {
-              tracked.remove(key); lastShown.remove(key); notifications.cancelLocal(trackedServerId, trackedSessionId)
+              state.connected && !state.degraded && state.catalogComplete && state.sessions.none { it.id == trackedSessionId }) {
+              tracked.remove(key)
               return@forEach
             }
-            val trackedProfile = state.profiles.firstOrNull { it.id == trackedServerId } ?: profile
-            val session = state.sessions.firstOrNull { it.id == trackedSessionId } ?: Session(trackedSessionId, "", "OpenCode 任务", 0)
             val task = state.tasks[trackedSessionId] ?: return@forEach
-            val terminal = task.phase in TERMINAL_PHASES
-            // state emits very frequently while streaming; only rebuild and re-post a notification
-            // when the phase or detail actually changed since the last post for this session.
-            val signature = task.phase to task.detail
-            val changed = lastShown[key] != signature
-            if (terminal) {
-              if (changed) { notifications.show(trackedProfile, session, task); lastShown.remove(key) }
-              tracked.remove(key)
-            } else if (task.active) {
-              if (changed) {
-                notifications.show(trackedProfile, session, task, state.permissions.firstOrNull { it.sessionId == trackedSessionId })
-                lastShown[key] = signature
-              }
-            }
+            if (task.phase in TERMINAL_PHASES) tracked.remove(key)
+            // The controller/verified push publisher owns task notifications. This service only
+            // keeps the SSE monitoring process alive; it must never republish a result.
           }
           if (tracked.isEmpty()) {
             // DETACH would leave the monitoring notification behind; remove it and then stop.
@@ -95,5 +77,5 @@ class TaskMonitorService : Service() {
     return START_REDELIVER_INTENT
   }
   override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }
-  override fun onDestroy() { tracked.clear(); lastShown.clear(); monitor?.cancel(); super.onDestroy() }
+  override fun onDestroy() { tracked.clear(); monitor?.cancel(); super.onDestroy() }
 }

@@ -15,6 +15,8 @@ import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.igng.opencode.lagoon.R
+import com.igng.opencode.lagoon.core.ServerStore
+import com.igng.opencode.lagoon.core.displayTitle
 import com.igng.opencode.lagoon.core.PermissionRequest
 import com.igng.opencode.lagoon.core.ServerProfile
 import com.igng.opencode.lagoon.core.Session
@@ -34,8 +36,8 @@ class TaskNotifications(private val context: Context) {
     const val COMPLETED = "task_completed"
     const val SUMMARY = "task_summary"
     fun notificationId(serverId: String, sessionId: String): Int = "${serverId}:$sessionId".hashCode() and 0x7fffffff
-    /** Separate id space for server-pushed notifications so they never cancel an in-app one. */
-    fun pushNotificationId(serverId: String, sessionId: String): Int = "push:$serverId:$sessionId".hashCode() and 0x7fffffff
+    /** Push and foreground events share the same session notification identity. */
+    fun pushNotificationId(serverId: String, sessionId: String): Int = notificationId(serverId, sessionId)
     /** One server-wide island/summary notification per server. */
     fun summaryId(serverId: String): Int = "summary:$serverId".hashCode() and 0x7fffffff
   }
@@ -69,12 +71,12 @@ class TaskNotifications(private val context: Context) {
     val running = state.phase in TaskState.RUNNING_PHASES
     val channel = if (waiting) ATTENTION else if (running) RUNNING else COMPLETED
     val title = when (state.phase) {
-      TaskPhase.COMPLETED -> "已完成 · ${session.title}"
-      TaskPhase.FAILED -> "执行失败 · ${session.title}"
-      TaskPhase.ABORTED -> "已停止 · ${session.title}"
-      TaskPhase.WAITING_PERMISSION -> "需要授权 · ${session.title}"
-      TaskPhase.WAITING_QUESTION -> "需要回答 · ${session.title}"
-      else -> "运行中 · ${session.title}"
+      TaskPhase.COMPLETED -> "已完成 · ${session.displayTitle()}"
+      TaskPhase.FAILED -> "执行失败 · ${session.displayTitle()}"
+      TaskPhase.ABORTED -> "已停止 · ${session.displayTitle()}"
+      TaskPhase.WAITING_PERMISSION -> "需要授权 · ${session.displayTitle()}"
+      TaskPhase.WAITING_QUESTION -> "需要回答 · ${session.displayTitle()}"
+      else -> "运行中 · ${session.displayTitle()}"
     }
     // When a permission is pending, show what the agent actually wants to run (action + patterns)
     // instead of the fixed "等待权限确认" so the user can decide knowingly (A16).
@@ -84,7 +86,7 @@ class TaskNotifications(private val context: Context) {
       .setContentTitle(title).setContentText(body.take(200))
       .setStyle(NotificationCompat.BigTextStyle().bigText(body))
       .setContentIntent(open(profile.id, session.id)).setAutoCancel(!state.active)
-      .setOnlyAlertOnce(running).setOngoing(running)
+      .setOnlyAlertOnce(state.active).setOngoing(running)
       .setCategory(if (waiting) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_PROGRESS)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
     if (running) {
@@ -124,13 +126,15 @@ class TaskNotifications(private val context: Context) {
     if (!allowed()) return
     if (!profile.notifications) return
     if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
-    manager.notify(notificationId(profile.id, session.id), build(profile, session, state, permission))
+    val store = ServerStore(context)
+    val previous = store.taskStates(profile.id)[session.id]
+    val next = store.rememberTask(profile.id, if (previous != null && previous.phase == state.phase) state.copy(since = previous.since) else state, session.parentId)
+    if (next.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED) && session.id in store.acknowledgedTasks(profile.id)) return
+    val signature = permission?.id.orEmpty()
+    if (!store.claimNotification(profile.id, next, signature)) return
+    manager.notify(notificationId(profile.id, session.id), build(profile, session, next, permission))
   }
-  fun showPush(notificationId: Int, profile: ServerProfile, session: Session, state: TaskState) {
-    if (!allowed() || !profile.notifications) return
-    if (state.phase == TaskPhase.IDLE || state.phase == TaskPhase.DISCONNECTED) return
-    manager.notify(notificationId, build(profile, session, state))
-  }
+  fun showPush(notificationId: Int, profile: ServerProfile, session: Session, state: TaskState) = show(profile, session, state)
   fun cancelLocal(serverId: String, sessionId: String) = manager.cancel(notificationId(serverId, sessionId))
   fun cancel(serverId: String, sessionId: String) {
     manager.cancel(notificationId(serverId, sessionId))

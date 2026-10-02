@@ -182,12 +182,12 @@ internal object HonorIslandAdapter : IslandAdapter {
   override fun support(context: Context, profile: ServerProfile?): IslandSupport = IslandSupport(
     vendor = vendor,
     label = "荣耀灵动胶囊（YOYO 建议）",
-    supported = isHonor() && enabled(profile),
+    supported = false,
     granted = false,
     note = when {
       !isHonor() -> "当前设备不是荣耀。"
       !enabled(profile) -> "该通道需荣耀开发者企业认证与白名单，当前未开启。"
-      else -> "通道已开启；灵动胶囊的呈现由荣耀审核与 YOYO 建议服务控制。"
+      else -> "尚未实现荣耀企业通道，当前不可用。"
     }
   )
 
@@ -215,12 +215,12 @@ internal object OppoFluidCloudAdapter : IslandAdapter {
   override fun support(context: Context, profile: ServerProfile?): IslandSupport = IslandSupport(
     vendor = vendor,
     label = "OPPO 流体云（ColorOS 15 意图共享）",
-    supported = isOppo() && enabled(profile),
-    granted = enabled(profile),
+    supported = false,
+    granted = false,
     note = when {
       !isOppo() -> "当前设备不是 OPPO / 一加 / realme。"
       !enabled(profile) -> "该通道需 OPPO 开放平台分配 serviceId，当前未开启；ColorOS 16 走标准实时更新即可。"
-      else -> "通道已开启；请确认真机系统为 ColorOS 15 且意图共享特性开关已打开。"
+      else -> "尚未接入 OPPO 意图共享通道，当前不可用。"
     }
   )
 

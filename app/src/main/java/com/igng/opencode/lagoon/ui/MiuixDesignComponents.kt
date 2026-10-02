@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -35,21 +36,19 @@ fun miuixSquircleShape(cornerRadius: Dp = 16.dp): Shape {
  * 主色采用小米 HyperOS 官方经典科技蓝 #3482FF，搭配全套层次色阶。
  */
 object MiuixColorTokens {
-  val Primary = Color(0xFF3482FF)
-  val PrimaryVariant = Color(0xFF277AF7)
-  val PrimarySubtle = Color(0x1F3482FF)
-
-  val Success = Color(0xFF34C759)
-  val Warning = Color(0xFFFF9500)
-  val Error = Color(0xFFF04438)
-  val Info = Color(0xFF007AFF)
-
-  // 状态背景柔色
-  val SuccessSubtle = Color(0x1F34C759)
-  val WarningSubtle = Color(0x1FFFF9500)
-  val ErrorSubtle = Color(0x1FF04438)
-  val NeutralSubtle = Color(0x14000000)
-  val NeutralSubtleDark = Color(0x26FFFFFF)
+  private val dark: Boolean @Composable get() = MiuixTheme.colorScheme.background.luminance() < 0.3f
+  val Primary: Color @Composable get() = MiuixTheme.colorScheme.primary
+  val PrimaryVariant: Color @Composable get() = Primary
+  val PrimarySubtle: Color @Composable get() = Primary.copy(alpha = 0.12f)
+  val Success: Color @Composable get() = if (dark) Color(0xFF91CEAA) else Color(0xFF246D46)
+  val Warning: Color @Composable get() = if (dark) Color(0xFFE4BE86) else Color(0xFF82581F)
+  val Error: Color @Composable get() = if (dark) Color(0xFFE7AEA6) else Color(0xFFA23932)
+  val Info: Color @Composable get() = Primary
+  val SuccessSubtle: Color @Composable get() = Success.copy(alpha = 0.12f)
+  val WarningSubtle: Color @Composable get() = Warning.copy(alpha = 0.12f)
+  val ErrorSubtle: Color @Composable get() = Error.copy(alpha = 0.12f)
+  val NeutralSubtle: Color @Composable get() = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+  val NeutralSubtleDark: Color @Composable get() = NeutralSubtle
 }
 
 /**

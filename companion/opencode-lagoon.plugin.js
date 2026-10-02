@@ -96,12 +96,15 @@ export const OpenCodeLagoonPlugin = async ({ directory }) => {
     "session.status", "session.idle", "session.error", "session.aborted", "permission.asked", "permission.replied",
     "question.asked", "question.replied", "question.rejected", "permission.rejected", "message.part.updated",
     "permission.v2.asked", "permission.v2.replied", "question.v2.asked", "question.v2.replied", "question.v2.rejected",
+    "session.next.prompted", "session.next.prompt.admitted", "session.next.step.started", "session.next.retried",
+    "session.next.tool.called", "session.next.shell.started", "session.next.step.failed",
   ])
   return {
     event: async ({ event }) => {
       if (!allowed.has(event.type)) return
       const properties = event.properties ?? event.data ?? {}
-      const part = properties.part ?? {}
+      const part = properties.part ?? (event.type === "session.next.tool.called" ? { type: "tool", name: properties.tool, state: { input: properties.input } }
+        : event.type === "session.next.shell.started" ? { type: "tool", name: "shell", state: { input: { command: properties.command } } } : {})
       const sessionId = properties.sessionID ?? part.sessionID
       if (!sessionId) return
       if (event.type === "message.part.updated" && !["tool", "reasoning"].includes(part.type)) return
@@ -124,6 +127,7 @@ export const OpenCodeLagoonPlugin = async ({ directory }) => {
         // on TESTING/SUBAGENT/TOOL without the companion having to receive private command text.
         toolKind: part.type === "tool" ? classifyTool(part) : undefined,
         partType: part.type,
+        toolStatus: part.state?.status,
       }
       await forwarder.enqueue(body)
 

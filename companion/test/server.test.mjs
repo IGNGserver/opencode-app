@@ -141,3 +141,20 @@ test('real plugin projection keeps private command/output out of the durable spo
   await sleep(30)
  }finally{globalThis.fetch=oldFetch;for(const key of ['OPENCODE_LAGOON_PLUGIN_QUEUE_DIR','OPENCODE_LAGOON_COMPANION_URL','OPENCODE_LAGOON_PLUGIN_SECRET','OPENCODE_LAGOON_SERVER_KEY']){if(old[key]==null)delete process.env[key];else process.env[key]=old[key]}}
 })
+
+
+test('settled tool snapshots and delayed deltas cannot revive completed tasks', () => {
+  for (const phase of ['COMPLETED', 'FAILED', 'ABORTED']) {
+    assert.equal(mapEvent({type:'message.part.updated',partType:'tool',tool:'task',toolStatus:'completed'}, {phase}), null)
+    assert.equal(mapEvent({type:'message.part.updated',partType:'reasoning'}, {phase}), null)
+    assert.equal(mapEvent({type:'session.next.tool.called',tool:'shell'}, {phase}), null)
+  }
+  assert.equal(mapEvent({type:'message.part.updated',partType:'tool',tool:'bash',toolStatus:'error'}, {phase:'TESTING'}), null)
+  assert.deepEqual(mapEvent({type:'session.next.prompted'}, {phase:'COMPLETED'}), {phase:'THINKING',detail:'正在处理'})
+})
+
+test('native tool events preserve the plugin-derived classification without private inputs', () => {
+  assert.deepEqual(mapEvent({type:'session.next.tool.called',tool:'bash',toolKind:'TESTING'}, {phase:'THINKING'}), {phase:'TESTING',detail:'正在运行 bash'})
+  assert.deepEqual(mapEvent({type:'session.next.tool.called',tool:'task',toolKind:'SUBAGENT'}, {phase:'THINKING'}), {phase:'SUBAGENT',detail:'正在运行 task'})
+  assert.deepEqual(mapEvent({type:'session.next.step.failed'}, {phase:'TOOL'}), {phase:'FAILED',detail:'执行失败'})
+})
