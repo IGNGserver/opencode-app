@@ -20,8 +20,18 @@ data class ServerProfile(
   val islandOppoFluidCloud: Boolean = false
 )
 
-data class Project(val id: String, val directory: String, val name: String)
-data class Session(val id: String, val directory: String, val title: String, val updated: Long, val parentId: String? = null)
+data class Project(val id: String, val directory: String, val name: String, val timeUpdated: Long = 0)
+data class Session(
+  val id: String,
+  val directory: String,
+  val title: String,
+  val updated: Long,
+  val parentId: String? = null,
+  /** 归属项目 id（V1/V2 都有 projectID），归属判定用它而非 directory 字符串匹配。 */
+  val projectId: String = "",
+  /** 标题仍是协议默认值（形如 `New session - <ISO>`，待 title agent 生成）。 */
+  val titleIsDefault: Boolean = false
+)
 data class Message(val id: String, val role: String, val created: Long, val parts: List<MessagePart>, val error: String? = null)
 data class MessagePart(
   val id: String,
@@ -114,13 +124,22 @@ private fun JSONObject.valueText(key: String): String {
 }
 
 internal fun JSONObject.toProject(): Project {
-  val directory = str("worktree").ifBlank { str("directory") }
-  return Project(str("id"), directory, str("name").ifBlank { directory.substringAfterLast('/') })
+  // V1 路径标识是 worktree，V2 是 canonical（V2 无 worktree/directory 字段）。
+  val directory = str("worktree").ifBlank { str("canonical") }.ifBlank { str("directory") }
+  return Project(str("id"), directory, str("name").ifBlank { directory.substringAfterLast('/') }, longPath("time", "updated"))
 }
-internal fun JSONObject.toSession(): Session = Session(
-  str("id"), str("directory").ifBlank { obj("location").str("directory") },
-  str("title").ifBlank { "未命名会话" }, longPath("time", "updated"), str("parentID").ifBlank { null }
-)
+internal fun JSONObject.toSession(): Session {
+  val title = str("title")   // V1 title 必有；V2 title 可缺省（非 required）
+  return Session(
+    str("id"), str("directory").ifBlank { obj("location").str("directory") },
+    title, longPath("time", "updated"), str("parentID").ifBlank { null },
+    str("projectID"), isDefaultTitle(title)   // 归属用 projectID，标题默认值待 LLM 生成
+  )
+}
+
+/** 会话标题是否仍是协议默认值（官方 `Session.isDefaultTitle`）：`New session - <ISO>` / `Child session - <ISO>`。 */
+internal fun isDefaultTitle(title: String): Boolean =
+  title.isBlank() || Regex("^(New session - |Child session - )\\d{4}-\\d{2}-\\d{2}T").containsMatchIn(title)
 internal fun JSONObject.toMessage(): Message {
   val info = obj("info")
   if (info.length() == 0 && str("type").isNotBlank()) return toV2Message()
@@ -150,10 +169,18 @@ private fun JSONObject.toV2Message(): Message {
     "assistant" -> "assistant"
     else -> "system"
   }
+  // V2 消息是 11 种 tagged union（判别 type），逐类映射，未知保留原文，禁止静默丢弃。
   val parts = when (type) {
+    "user" -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart("${str("id")}_text", "text", text = it) }) +
+      arr("files").objects().map { MessagePart(it.str("name"), "file", path = it.str("name"), text = it.str("description")) }
     "assistant" -> arr("content").objects().map { part -> part.toV2MessagePart() }
-    "shell" -> listOf(MessagePart(str("id"), "tool", text = str("command"), tool = "shell", output = str("output")))
-    else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) })
+    "shell" -> listOf(MessagePart(str("id"), "tool", tool = "shell", title = str("command"),
+      text = str("command"), status = str("status"), output = obj("output").str("output")))
+    "compaction" -> listOf(MessagePart(str("id"), "compaction", text = str("summary").ifBlank { "上下文已压缩" }))
+    "system", "synthetic", "skill", "agent-switched", "model-selected", "location-switched", "idle" ->
+      listOf(MessagePart(str("id"), type,
+        text = str("text").ifBlank { str("summary") }.ifBlank { str("name") }.ifBlank { toString() }))
+    else -> listOf(MessagePart(str("id"), type.ifBlank { "unknown" }, text = toString()))
   }
   return Message(
     id = str("id"), role = role, created = longPath("time", "created"), parts = parts,
@@ -164,13 +191,25 @@ private fun JSONObject.toV2Message(): Message {
 /** Projects one V2 `message.part.updated` part object. */
 internal fun JSONObject.toV2MessagePart(): MessagePart {
   val state = obj("state")
+  // V2 工具输出/附件在 ToolState.Completed.content: Tool.Content[]（TextContent | FileContent），
+  // 而非 V1 的 state.output（V2 无该字段）。
+  val content = state.arr("content")
   return MessagePart(
     id = str("id"), type = str("type"), text = str("text"), tool = str("name"),
     status = state.str("status"), input = state.valueText("input"),
-    output = state.valueText("result").ifBlank { state.valueText("content") },
-    error = state.errorMessage().ifBlank { errorMessage() }
+    output = content.toolContentText(),
+    error = state.obj("error").str("message").ifBlank { state.str("error") }.ifBlank { errorMessage() },
+    files = content.toolContentFiles()
   )
 }
+
+/** Tool.Content[] 中 TextContent.text 拼接为工具输出文本。 */
+private fun JSONArray.toolContentText(): String =
+  objects().filter { it.str("type") == "text" }.joinToString("\n") { it.str("text") }
+
+/** Tool.Content[] 中 FileContent 的文件名（name? 退化到 uri）。 */
+private fun JSONArray.toolContentFiles(): List<String> =
+  objects().filter { it.str("type") == "file" }.map { it.str("name").ifBlank { it.str("uri") } }
 internal fun JSONObject.toPermission(directory: String): PermissionRequest {
   val detail = when {
     arr("patterns").length() > 0 -> arr("patterns").toString()
