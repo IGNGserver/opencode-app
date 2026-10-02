@@ -323,8 +323,8 @@ class OpenCodeApiTest {
     }
   }
 
-  /** V2 unrevert falls back to the current DELETE .../revert when revert/clear is absent. */
-  @Test fun v2UnrevertFallsBackToDeleteRevert() = runBlocking {
+  /** A failed write must not cause an undocumented second mutation. */
+  @Test fun v2UnrevertDoesNotGuessAnotherWrite() = runBlocking {
     MockWebServer().use { server ->
       server.enqueue(MockResponse().setResponseCode(404))
       server.enqueue(MockResponse().setBody("""{"healthy":true}"""))
@@ -332,12 +332,10 @@ class OpenCodeApiTest {
       server.enqueue(MockResponse().setResponseCode(204)) // DELETE revert
       val api = OpenCodeApi(ServerProfile("local", "Local", server.url("/").toString().trimEnd('/'), allowCleartext = true), "secret")
       api.health()
-      api.unrevert(Session("ses-1", "/repo", "Task", 0))
+      try { api.unrevert(Session("ses-1", "/repo", "Task", 0)); org.junit.Assert.fail("expected 404") } catch (error: ApiException) { assertEquals(404, error.status) }
       server.takeRequest(); server.takeRequest()
       assertEquals("/api/session/ses-1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
-      val fallback = server.takeRequest()
-      assertEquals("DELETE", fallback.method)
-      assertEquals("/api/session/ses-1/revert", fallback.requestUrl?.encodedPath)
+      assertEquals(3, server.requestCount)
     }
   }
 

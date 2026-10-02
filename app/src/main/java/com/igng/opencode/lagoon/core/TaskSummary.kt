@@ -56,21 +56,41 @@ data class TaskSummary(
     /**
      * @param acknowledged 已被用户查看过、不再计入“未读已完成/失败”的会话 id。
      */
-    fun of(tasks: Map<String, TaskState>, acknowledged: Set<String> = emptySet()): TaskSummary {
+    fun of(tasks: Map<String, TaskState>, acknowledged: Set<String> = emptySet(), parents: Map<String, String> = emptyMap()): TaskSummary {
+      val unreadOrActive = tasks.filterValues { it.phase !in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED) || it.sessionId !in acknowledged }
+      val rootTasks = if (parents.isEmpty()) unreadOrActive else aggregate(unreadOrActive, parents)
       var running = 0
       var completed = 0
       var waiting = 0
       var failed = 0
-      for (task in tasks.values) {
+      for (task in rootTasks.values) {
         when (task.phase) {
           in TaskState.RUNNING_PHASES -> running += 1
           TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION -> waiting += 1
-          TaskPhase.COMPLETED -> if (task.sessionId !in acknowledged) completed += 1
-          TaskPhase.FAILED -> if (task.sessionId !in acknowledged) failed += 1
+          TaskPhase.COMPLETED -> completed += 1
+          TaskPhase.FAILED -> failed += 1
           else -> Unit
         }
       }
       return TaskSummary(running = running, completed = completed, waiting = waiting, failed = failed)
+    }
+    fun aggregate(tasks: Map<String, TaskState>, parents: Map<String, String>): Map<String, TaskState> {
+      fun root(id: String): String {
+        var current = id
+        val seen = mutableSetOf<String>()
+        while (seen.add(current)) current = parents[current] ?: return current
+        return id
+      }
+      fun priority(task: TaskState): Int = when (task.phase) {
+        in TaskState.WAITING_PHASES -> 5
+        in TaskState.RUNNING_PHASES -> 4
+        TaskPhase.FAILED -> 3
+        TaskPhase.COMPLETED -> 2
+        else -> 1
+      }
+      return tasks.values.groupBy { root(it.sessionId) }.mapValues { (id, values) ->
+        values.maxBy { priority(it) }.copy(sessionId = id)
+      }
     }
   }
 }

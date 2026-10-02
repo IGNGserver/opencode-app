@@ -114,11 +114,13 @@ class OfflineCache internal constructor(
     Diagnostics.warn("OfflineCache", "读取 $name 失败", error)
     null
   }
-  fun saveCatalog(serverId: String, projects: List<Project>, sessions: List<Session>) {
+  fun saveCatalog(serverId: String, projects: List<Project>, sessions: List<Session>, complete: Boolean = true) {
     write("catalog:$serverId") {
-      JSONObject().put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
+      JSONObject().put("complete", complete && sessions.size <= 300).put("projects", JSONArray().apply { projects.forEach { put(JSONObject().put("id", it.id).put("directory", it.directory).put("name", it.name)) } })
         .put("sessions", JSONArray().apply { sessions.take(300).forEach { put(JSONObject().put("id", it.id).put("directory", it.directory)
-          .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId)) } })
+          .put("title", it.title).put("updated", it.updated).put("parentId", it.parentId)
+          .put("projectId", it.projectId).put("created", it.created).put("archived", it.archived).put("agent", it.agent)
+          .put("model", it.model?.let { model -> JSONObject().put("providerID", model.providerId).put("modelID", model.modelId).put("name", model.label) })) } })
         .toString()
     }
   }
@@ -127,38 +129,54 @@ class OfflineCache internal constructor(
     return try {
     val data = JSONObject(raw)
     data.arr("projects").objects().map { Project(it.str("id"), it.str("directory"), it.str("name")) } to
-      data.arr("sessions").objects().map { Session(it.str("id"), it.str("directory"), it.str("title"), it.optLong("updated"), it.str("parentId").ifBlank { null }) }
+      data.arr("sessions").objects().map { Session(it.str("id"), it.str("directory"), it.str("title"), it.optLong("updated"), it.str("parentId").ifBlank { null }, it.str("projectId").ifBlank { null }, it.optLong("created"), it.optBoolean("archived"),
+        it.str("agent").ifBlank { null }, it.obj("model").toModelChoice()) }
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "catalog 解析失败", error)
     null
   }
   }
-  fun saveMessages(serverId: String, sessionId: String, messages: List<Message>) {
+  fun saveMessages(serverId: String, sessionId: String, messages: List<Message>, complete: Boolean = true) {
     write("messages:$serverId:$sessionId") {
-      JSONArray().apply { messages.takeLast(100).forEach { message ->
+      val clipped = messages.size > 100 || messages.any { message -> message.parts.any { part ->
+        part.text.length > 20_000 || part.input.length > 4_000 || part.output.length > 4_000 || part.error.length > 4_000 || part.patch.length > 20_000
+      } }
+      val items = JSONArray().apply { messages.takeLast(100).forEach { message ->
         put(JSONObject().put("id", message.id).put("role", message.role).put("created", message.created).put("error", message.error)
+          .put("completedAt", message.completedAt).put("finish", message.finish).put("agent", message.agent)
+          .put("model", message.model?.let { model -> JSONObject().put("providerID", model.providerId).put("modelID", model.modelId).put("name", model.label) })
           .put("parts", JSONArray().apply { message.parts.forEach { part ->
             put(JSONObject().put("id", part.id).put("type", part.type).put("text", part.text.take(20_000))
               .put("tool", part.tool).put("title", part.title).put("status", part.status).put("input", part.input.take(4_000))
               .put("output", part.output.take(4_000)).put("path", part.path).put("error", part.error.take(4_000))
-              .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)))
+              .put("patch", part.patch.take(20_000)).put("files", JSONArray(part.files)).put("mime", part.mime)
+              .put("attachments", JSONArray().apply { part.attachments.forEach { put(JSONObject().put("uri", it.url).put("mime", it.mime).put("name", it.name)) } }))
           } }))
-      } }.toString()
+      } }
+      JSONObject().put("messages", items).put("complete", complete && !clipped).toString()
     }
   }
   fun messages(serverId: String, sessionId: String): List<Message> {
     val raw = read("messages:$serverId:$sessionId") ?: return emptyList()
     return try {
-    JSONArray(raw).objects().map { item ->
+    val items = if (raw.trimStart().startsWith("[")) JSONArray(raw) else JSONObject(raw).arr("messages")
+    items.objects().map { item ->
       Message(item.str("id"), item.str("role"), item.optLong("created"), item.arr("parts").objects().map { part ->
         MessagePart(part.str("id"), part.str("type"), part.str("text"), part.str("tool"), part.str("title"), part.str("status"), part.str("input"), part.str("output"), part.str("path"), part.str("error"), part.str("patch"),
-          (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) })
-      }, item.str("error").ifBlank { null })    }
+          (0 until part.arr("files").length()).mapNotNull { index -> part.arr("files").optString(index).takeIf(String::isNotBlank) }, part.str("mime"), part.arr("attachments").toAttachments())
+      }, item.str("error").ifBlank { null }, item.str("agent").ifBlank { null }, item.obj("model").toModelChoice(),
+        item.optLong("completedAt").takeIf { it > 0 }, item.str("finish").ifBlank { null })    }
   } catch (error: Exception) {
     Diagnostics.warn("OfflineCache", "messages 解析失败", error)
     emptyList()
   }
   }
+  fun messagesComplete(serverId: String, sessionId: String): Boolean = runCatching {
+    JSONObject(read("messages:$serverId:$sessionId") ?: return false).optBoolean("complete", false)
+  }.getOrDefault(false)
+  fun catalogComplete(serverId: String): Boolean = runCatching {
+    JSONObject(read("catalog:$serverId") ?: return false).optBoolean("complete", false)
+  }.getOrDefault(false)
   fun delete(serverId: String) {
     synchronized(pendingLock) {
       val matches = (index + preferences.all.keys + pending.keys + inFlight + nameSequence.keys).filter { it == "catalog:$serverId" || it.startsWith("messages:$serverId:") }.toSet()

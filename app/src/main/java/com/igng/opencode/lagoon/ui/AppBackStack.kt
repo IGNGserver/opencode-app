@@ -26,6 +26,12 @@ internal enum class BackStage {
  * Keeping the transitions pure makes the "侧滑只回上一级、不回桌面" contract verifiable
  * without a device.
  */
+internal data class SessionNavigation(val tab: RootTab = RootTab.SESSIONS, val sessions: List<String> = emptyList()) {
+  val canGoBack get() = sessions.isNotEmpty() || !tab.isRoot
+  fun open(id: String, child: Boolean = false) = copy(sessions = if (child && sessions.isNotEmpty()) sessions.takeWhile { it != id } + id else listOf(id))
+  fun back() = if (sessions.isNotEmpty()) copy(sessions = sessions.dropLast(1)) else copy(tab = RootTab.SESSIONS)
+}
+
 internal object AppBackStack {
   /** Whether an in-app step exists; when false the system should handle back (leave the app). */
   fun canGoBack(detail: Boolean, tab: RootTab): Boolean = detail || !tab.isRoot

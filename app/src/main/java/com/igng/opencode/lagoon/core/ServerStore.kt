@@ -66,6 +66,45 @@ class ServerStore internal constructor(private val preferences: SharedPreference
     editor.commit()
   }
 
+  fun taskStates(id: String): Map<String, TaskState> = preferences.all.filterKeys { it.startsWith("taskState:$id:") }
+    .mapNotNull { (key, raw) -> runCatching {
+      val json = JSONObject(raw as String); val session = key.removePrefix("taskState:$id:")
+      session to TaskState(session, TaskPhase.valueOf(json.str("phase")), json.str("detail"), json.optLong("since"), json.optLong("finished").takeIf { it > 0 })
+    }.getOrNull() }.toMap()
+  fun taskParents(id: String): Map<String, String> = preferences.all.filterKeys { it.startsWith("taskParent:$id:") }
+    .mapKeys { it.key.removePrefix("taskParent:$id:") }.mapValues { it.value as? String ?: "" }.filterValues(String::isNotBlank)
+  fun rememberParents(id: String, sessions: List<Session>) {
+    val editor = preferences.edit()
+    sessions.forEach { session ->
+      val key = "taskParent:$id:${session.id}"
+      if (session.parentId == null) editor.remove(key) else editor.putString(key, session.parentId)
+    }
+    editor.apply()
+  }
+  fun rememberTask(id: String, state: TaskState, parent: String? = null, observedAt: Long = System.currentTimeMillis(), durable: Boolean = false): TaskState = synchronized(pushLock) {
+    val key = "taskState:$id:${state.sessionId}"
+    val previous = runCatching { JSONObject(preferences.getString(key, "")!!).let { json -> TaskState(state.sessionId, TaskPhase.valueOf(json.str("phase")), json.str("detail"), json.optLong("since"), json.optLong("finished").takeIf { it > 0 }) } }.getOrNull()
+    val lastObserved = preferences.getLong("taskTime:$id:${state.sessionId}", 0)
+    if (observedAt < lastObserved) return@synchronized previous ?: state
+    val next = if (previous != null && state.active && !previous.active && state.since <= previous.since)
+      state.copy(since = observedAt, finishedAt = null) else state
+    if (previous != next || parent != preferences.getString("taskParent:$id:${state.sessionId}", null)) {
+      val editor = preferences.edit().putString(key, JSONObject().put("phase", next.phase.name).put("detail", next.detail)
+        .put("since", next.since).put("finished", next.finishedAt).toString()).putLong("taskTime:$id:${state.sessionId}", observedAt)
+      if (parent != null) editor.putString("taskParent:$id:${state.sessionId}", parent)
+      if (previous?.since != next.since || previous?.phase !in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED) && next.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED))
+        editor.remove("taskRead:$id:${state.sessionId}")
+      if (durable) editor.commit() else editor.apply()
+    }
+    next
+  }
+  fun claimNotification(id: String, state: TaskState, detail: String): Boolean = synchronized(pushLock) {
+    val key = "notification:$id:${state.sessionId}"
+    val signature = "${state.since}:${state.phase}:$detail"
+    if (preferences.getString(key, "") == signature) return@synchronized false
+    preferences.edit().putString(key, signature).commit()
+  }
+
   /** Latest background-observed phases for one server, as session id to phase name. */
   fun pushPhases(id: String): Map<String, String> =
     preferences.all.filter { (k, _) -> k.startsWith("pushPhase:$id:") }
@@ -77,16 +116,74 @@ class ServerStore internal constructor(private val preferences: SharedPreference
    * Sessions whose terminal result the user has already opened. Persisted per server so the island
    * summary stays unread-aware even after the App is killed and rebuilt from background pushes.
    */
-  fun acknowledgedTasks(id: String): Set<String> =
-    preferences.all.keys.filter { it.startsWith("taskRead:$id:") }.map { it.removePrefix("taskRead:$id:") }.toSet()
+  fun acknowledgedTasks(id: String): Set<String> {
+    val states = taskStates(id)
+    return preferences.all.filterKeys { it.startsWith("taskRead:$id:") }.filter { (key, read) ->
+      read == "1" || read == states[key.removePrefix("taskRead:$id:")]?.since?.toString()
+    }.keys.map { it.removePrefix("taskRead:$id:") }.toSet()
+  }
 
+  fun unacknowledgeTask(id: String, session: String) {
+    preferences.edit().remove("taskRead:$id:$session").apply()
+  }
   fun acknowledgeTask(id: String, session: String) {
-    preferences.edit().putString("taskRead:$id:$session", "1").apply()
+    preferences.edit().putString("taskRead:$id:$session", taskStates(id)[session]?.since?.toString() ?: "1").apply()
   }
 
   fun selectedId(): String? = preferences.getString("selected", null)
-  fun selectedProject(): String? = preferences.getString("selectedProject", null)
-  fun selectedSession(): String? = preferences.getString("selectedSession", null)
+  fun selectedProject(id: String? = selectedId()): String? = id?.let { preferences.getString("location:$it:project", null)
+    ?: preferences.getString("selectedProject", null).takeIf { selectedId() == id } }
+  fun selectedSession(id: String? = selectedId()): String? = id?.let { preferences.getString("location:$it:session", null)
+    ?: preferences.getString("selectedSession", null).takeIf { selectedId() == id } }
+
+  fun knownDirectories(id: String): Set<String> = preferences.getStringSet("directories:$id", emptySet()).orEmpty().toSet()
+  fun rememberDirectory(id: String, directory: String) {
+    preferences.edit().putStringSet("directories:$id", knownDirectories(id) + directory).apply()
+  }
+  fun sessionPreview(server: String, session: String): SessionPreview = runCatching {
+    val raw = secrets.getString("preview:$server:$session", null)?.let(decryptValue)
+      ?: preferences.getString("preview:$server:$session", "{}").orEmpty()
+    val value = JSONObject(raw)
+    SessionPreview(SessionContent.valueOf(value.str("content").ifBlank { "UNKNOWN" }), value.str("text"))
+  }.getOrDefault(SessionPreview())
+  fun rememberPreview(server: String, session: String, preview: SessionPreview) {
+    runCatching {
+      val value = JSONObject().put("content", preview.content.name).put("text", preview.text).toString()
+      secrets.edit().putString("preview:$server:$session", encryptValue(value)).apply()
+      preferences.edit().remove("preview:$server:$session").apply()
+    }.onFailure { Diagnostics.warn("ServerStore", "会话摘要缓存暂不可用") }
+  }
+  fun configuration(server: String, session: String): SessionConfiguration = runCatching {
+    val value = JSONObject(preferences.getString("configuration:$server:$session", "{}").orEmpty())
+    SessionConfiguration(value.str("agent").ifBlank { null }, value.obj("model").toModelChoice(), value.optBoolean("agentChanged"), value.optBoolean("modelChanged"))
+  }.getOrDefault(SessionConfiguration())
+  fun rememberConfiguration(server: String, session: String, configuration: SessionConfiguration) {
+    val model = configuration.model?.let { JSONObject().put("providerID", it.providerId).put("modelID", it.modelId).put("name", it.label) }
+    preferences.edit().putString("configuration:$server:$session", JSONObject().put("agent", configuration.agent).put("model", model).put("agentChanged", configuration.agentChanged).put("modelChanged", configuration.modelChanged).toString()).apply()
+  }
+  fun references(server: String, session: String): List<FileReference> = runCatching {
+    val raw = secrets.getString("references:$server:$session", null)?.let(decryptValue) ?: "[]"
+    JSONArray(raw).objects().map { FileReference(it.str("path"), it.str("mime")) }
+  }.getOrDefault(emptyList())
+  fun rememberReferences(server: String, session: String, references: List<FileReference>) {
+    if (references.isEmpty()) secrets.edit().remove("references:$server:$session").apply()
+    else secrets.edit().putString("references:$server:$session", encryptValue(JSONArray().apply { references.forEach { put(JSONObject().put("path", it.path).put("mime", it.mime)) } }.toString())).apply()
+  }
+  fun draftSessionIds(server: String): Set<String> = secrets.all.keys.filter { it.startsWith("draft:$server:") }.map { it.removePrefix("draft:$server:") }.toSet()
+  fun draft(server: String, session: String): String = runCatching {
+    secrets.getString("draft:$server:$session", null)?.let(decryptValue).orEmpty()
+  }.getOrDefault("")
+  fun rememberDraft(server: String, session: String, text: String) {
+    val key = "draft:$server:$session"
+    if (text.isBlank()) secrets.edit().remove(key).apply()
+    else secrets.edit().putString(key, encryptValue(text.take(100_000))).apply()
+  }
+  fun forgetSession(server: String, session: String) {
+    val editor = preferences.edit()
+    listOf("preview", "configuration", "taskRead", "taskState", "pushPhase", "taskParent", "taskTime", "pushSeen", "notification").forEach { editor.remove("$it:$server:$session") }
+    editor.apply()
+    secrets.edit().remove("draft:$server:$session").remove("references:$server:$session").remove("preview:$server:$session").apply()
+  }
   fun deviceId(): String = preferences.getString("deviceId", null) ?: UUID.randomUUID().toString().also { preferences.edit().putString("deviceId", it).apply() }
 
   fun credentials(id: String): ServerCredentials {
@@ -120,10 +217,13 @@ class ServerStore internal constructor(private val preferences: SharedPreference
   }
 
   fun select(id: String, project: String? = null, session: String? = null) {
-    preferences.edit().putString("selected", id).putString("selectedProject", project).putString("selectedSession", session).apply()
+    preferences.edit().putString("selected", id).putString("selectedProject", project).putString("selectedSession", session)
+      .putString("location:$id:project", project).putString("location:$id:session", session).apply()
   }
   fun rememberLocation(project: String?, session: String?) {
-    preferences.edit().putString("selectedProject", project).putString("selectedSession", session).apply()
+    val id = selectedId() ?: return
+    preferences.edit().putString("selectedProject", project).putString("selectedSession", session)
+      .putString("location:$id:project", project).putString("location:$id:session", session).apply()
   }
 
   fun save(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null) {
@@ -157,9 +257,14 @@ class ServerStore internal constructor(private val preferences: SharedPreference
         .put("allowCleartext", item.allowCleartext).put("islandHonor", item.islandHonor)
         .put("islandOppoFluidCloud", item.islandOppoFluidCloud))
     } }
-    preferences.edit().putString("profiles", json.toString()).apply()
-    secrets.edit().remove(id).apply()
-    preferences.edit().remove("pluginSecret:$id").apply()
+    val editor = preferences.edit().putString("profiles", json.toString()).remove("pluginSecret:$id").remove("directories:$id")
+    val prefixes = listOf("location", "preview", "configuration", "taskRead", "taskState", "taskParent", "taskTime", "pushPhase", "pushSeen", "notification").map { "$it:$id:" }
+    preferences.all.keys.filter { key -> prefixes.any(key::startsWith) }.forEach(editor::remove)
+    editor.apply()
+    val encrypted = secrets.edit().remove(id)
+    val secretPrefixes = listOf("draft", "references", "preview").map { "$it:$id:" }
+    secrets.all.keys.filter { key -> secretPrefixes.any(key::startsWith) }.forEach(encrypted::remove)
+    encrypted.apply()
     if (selectedId() == id) select("", null, null)
   }
 }

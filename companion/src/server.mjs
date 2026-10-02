@@ -20,8 +20,13 @@ export function mapEvent(event, previous) {
   if (type === 'permission.asked') return { phase: 'WAITING_PERMISSION', detail: '等待权限确认' }
   if (type === 'question.asked') return { phase: 'WAITING_QUESTION', detail: '等待你的回答' }
   if (type === 'permission.replied' || type === 'permission.rejected' || type === 'question.replied' || type === 'question.rejected') return { phase: 'THINKING', detail: '继续执行' }
+  if (['session.next.prompted', 'session.next.prompt.admitted', 'session.next.step.started', 'session.next.retried'].includes(type)) return { phase: 'THINKING', detail: '正在处理' }
+  if (type === 'session.next.step.failed') return { phase: 'FAILED', detail: '执行失败' }
+  if (['message.part.updated', 'message.part.delta', 'session.next.text.delta', 'session.next.reasoning.delta', 'session.next.tool.called', 'session.next.shell.started'].includes(type) && ['COMPLETED', 'FAILED', 'ABORTED'].includes(previous?.phase)) return null
+  if (type === 'message.part.updated' && ['completed', 'error', 'done', 'success', 'failed'].includes(event.toolStatus)) return null
+  if (['message.part.delta', 'session.next.text.delta', 'session.next.reasoning.delta'].includes(type)) return { phase: 'THINKING', detail: '正在生成' }
   if (type === 'message.part.updated' && partType === 'reasoning') return { phase: 'THINKING', detail: '正在思考' }
-  if (type === 'message.part.updated' && partType === 'tool') {
+  if (type === 'message.part.updated' && partType === 'tool' || ['session.next.tool.called', 'session.next.shell.started'].includes(type)) {
     const kind = ['TESTING', 'SUBAGENT', 'TOOL'].includes(event.toolKind)
       ? event.toolKind
       : /test|gradle|pytest|vitest|jest/i.test(tool ?? '') ? 'TESTING' : ['task', 'subagent'].includes(tool) ? 'SUBAGENT' : 'TOOL'

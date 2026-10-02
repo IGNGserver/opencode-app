@@ -21,8 +21,12 @@ data class ServerProfile(
 )
 
 data class Project(val id: String, val directory: String, val name: String)
-data class Session(val id: String, val directory: String, val title: String, val updated: Long, val parentId: String? = null)
-data class Message(val id: String, val role: String, val created: Long, val parts: List<MessagePart>, val error: String? = null)
+data class Session(val id: String, val directory: String, val title: String, val updated: Long, val parentId: String? = null,
+  val projectId: String? = null, val created: Long = 0, val archived: Boolean = false,
+  val agent: String? = null, val model: ModelChoice? = null)
+data class Message(val id: String, val role: String, val created: Long, val parts: List<MessagePart>, val error: String? = null,
+  val agent: String? = null, val model: ModelChoice? = null, val completedAt: Long? = null, val finish: String? = null)
+data class Attachment(val url: String, val mime: String = "", val name: String = "")
 data class MessagePart(
   val id: String,
   val type: String,
@@ -35,7 +39,8 @@ data class MessagePart(
   val path: String = "",
   val error: String = "",
   val patch: String = "",
-  val files: List<String> = emptyList()
+  val files: List<String> = emptyList(),
+  val mime: String = "", val attachments: List<Attachment> = emptyList()
 )
 data class PermissionRequest(
   val id: String,
@@ -72,7 +77,7 @@ data class AgentChoice(val name: String, val description: String)
 data class CommandChoice(val name: String, val description: String)
 
 enum class TaskPhase { IDLE, THINKING, TOOL, SUBAGENT, TESTING, WAITING_PERMISSION, WAITING_QUESTION, COMPLETED, FAILED, ABORTED, DISCONNECTED }
-data class TaskState(val sessionId: String, val phase: TaskPhase, val detail: String = "", val since: Long = System.currentTimeMillis()) {
+data class TaskState(val sessionId: String, val phase: TaskPhase, val detail: String = "", val since: Long = System.currentTimeMillis(), val finishedAt: Long? = null) {
   val active: Boolean get() = when (phase) {
     TaskPhase.THINKING, TaskPhase.TOOL, TaskPhase.SUBAGENT, TaskPhase.TESTING, TaskPhase.WAITING_PERMISSION, TaskPhase.WAITING_QUESTION -> true
     else -> false
@@ -103,7 +108,7 @@ internal fun JSONObject.errorMessage(key: String = "error"): String {
   return value?.toString().orEmpty().takeUnless { it == "null" }.orEmpty()
 }
 
-private fun JSONObject.valueText(key: String): String {
+internal fun JSONObject.valueText(key: String): String {
   val value = opt(key) ?: return ""
   return when (value) {
     is JSONObject -> value.toString(2)
@@ -118,15 +123,31 @@ internal fun JSONObject.toProject(): Project {
   return Project(str("id"), directory, str("name").ifBlank { directory.substringAfterLast('/') })
 }
 internal fun JSONObject.toSession(): Session = Session(
-  str("id"), str("directory").ifBlank { obj("location").str("directory") },
-  str("title").ifBlank { "未命名会话" }, longPath("time", "updated"), str("parentID").ifBlank { null }
+  str("id"), str("directory").ifBlank { obj("location").str("directory").let { root -> str("subpath").takeIf { it.isNotBlank() }?.let { "$root/${it.trim('/')}" } ?: root } },
+  str("title"), longPath("time", "updated"), str("parentID").ifBlank { null },
+  str("projectID").ifBlank { obj("location").obj("project").str("id") }.ifBlank { null },
+  longPath("time", "created"), longPath("time", "archived") > 0,
+  str("agent").ifBlank { null }, obj("model").toModelChoice()
 )
+internal fun JSONObject.toModelChoice(): ModelChoice? {
+  val provider = str("providerID")
+  val model = str("modelID").ifBlank { str("id") }
+  return if (provider.isBlank() || model.isBlank()) null else ModelChoice(provider, model, str("name").ifBlank { model })
+}
+internal fun JSONArray.toAttachments(): List<Attachment> = objects().mapNotNull {
+  val url = it.str("uri").ifBlank { it.str("url") }.ifBlank { it.str("path") }
+  if (url.isBlank()) null else Attachment(url, it.str("mime").ifBlank { it.str("mediaType") }, it.str("filename").ifBlank { it.str("name") })
+}
+internal fun JSONArray.contentText(): String = objects().mapNotNull { item ->
+  item.str("text").takeIf { it.isNotBlank() }
+}.joinToString("\n")
 internal fun JSONObject.toMessage(): Message {
   val info = obj("info")
   if (info.length() == 0 && str("type").isNotBlank()) return toV2Message()
   val parts = arr("parts").objects().map { part -> part.toMessagePart() }
   return Message(info.str("id"), info.str("role"), info.longPath("time", "created"), parts,
-    info.errorMessage().ifBlank { null })
+    info.errorMessage().ifBlank { null }, info.str("agent").ifBlank { null }, (info.obj("model").toModelChoice() ?: info.toModelChoice()),
+    info.longPath("time", "completed").takeIf { it > 0 }, info.str("finish").ifBlank { null })
 }
 
 /** Projects one legacy/V1 `part` object (as delivered in `message.part.updated` and `parts[]`). */
@@ -137,9 +158,10 @@ internal fun JSONObject.toMessagePart(): MessagePart {
   return MessagePart(
     id = str("id"), type = type,
     text = str("text").ifBlank { str("description").ifBlank { str("prompt") } }, tool = str("tool"),
-    title = state.str("title"), status = state.str("status"), input = state.valueText("input"),
-    output = state.valueText("output").ifBlank { state.valueText("result") }, path = str("filename").ifBlank { str("path").ifBlank { str("url") } },
-    error = state.errorMessage().ifBlank { errorMessage() }, patch = str("patch"), files = files
+    title = state.str("title").ifBlank { str("filename") }, status = state.str("status"), input = state.valueText("input"),
+    output = state.valueText("output").ifBlank { state.valueText("result") }, path = str("url").ifBlank { str("uri").ifBlank { str("path").ifBlank { str("filename") } } },
+    error = state.errorMessage().ifBlank { errorMessage() }, patch = str("patch"), files = files,
+    mime = str("mime"), attachments = state.arr("attachments").toAttachments()
   )
 }
 
@@ -153,11 +175,16 @@ private fun JSONObject.toV2Message(): Message {
   val parts = when (type) {
     "assistant" -> arr("content").objects().map { part -> part.toV2MessagePart() }
     "shell" -> listOf(MessagePart(str("id"), "tool", text = str("command"), tool = "shell", output = str("output")))
-    else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) })
+    else -> listOfNotNull(str("text").takeIf(String::isNotBlank)?.let { MessagePart(str("id"), type, text = it) }) +
+      arr("files").toAttachments().mapIndexed { index, attachment ->
+        MessagePart("${str("id")}:file:$index", "file", path = attachment.url, title = attachment.name, mime = attachment.mime)
+      }
   }
   return Message(
     id = str("id"), role = role, created = longPath("time", "created"), parts = parts,
-    error = errorMessage().ifBlank { null }
+    error = errorMessage().ifBlank { null },
+    agent = str("agent").ifBlank { null }, model = obj("model").toModelChoice(),
+    completedAt = longPath("time", "completed").takeIf { it > 0 }, finish = str("finish").ifBlank { null }
   )
 }
 
@@ -167,7 +194,10 @@ internal fun JSONObject.toV2MessagePart(): MessagePart {
   return MessagePart(
     id = str("id"), type = str("type"), text = str("text"), tool = str("name"),
     status = state.str("status"), input = state.valueText("input"),
-    output = state.valueText("result").ifBlank { state.valueText("content") },
+    output = state.arr("content").contentText().ifBlank { state.valueText("result") },
+    path = str("uri").ifBlank { str("url").ifBlank { str("path") } }, title = str("filename"), mime = str("mime"),
+    files = (0 until state.arr("outputPaths").length()).mapNotNull { state.arr("outputPaths").optString(it).takeIf(String::isNotBlank) },
+    attachments = state.arr("attachments").toAttachments() + state.arr("content").toAttachments(),
     error = state.errorMessage().ifBlank { errorMessage() }
   )
 }
@@ -194,7 +224,7 @@ internal fun JSONObject.toQuestion(directory: String): QuestionRequest = Questio
 )
 internal fun JSONObject.toTodo(): TodoItem = TodoItem(str("content"), str("status"), str("priority"))
 internal fun JSONObject.toChange(): FileChange = FileChange(
-  path = str("file"), after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
+  path = str("file").ifBlank { str("path") }, after = str("after"), additions = optInt("additions"), deletions = optInt("deletions"),
   patch = str("patch")
 )
 internal fun JSONObject.toNode(): FileNode = FileNode(str("path"), str("type"))
@@ -210,15 +240,15 @@ object TaskReducer {
 
   fun status(sessionId: String, status: String, previous: TaskState? = null): TaskState = when (status) {
     "busy", "running" -> {
-      val continuing = previous?.active == true && previous.phase !in TaskState.WAITING_PHASES
-      TaskState(sessionId, if (continuing) previous!!.phase else TaskPhase.THINKING,
-        if (continuing) previous!!.detail else "正在处理",
+      val continuing = previous?.active == true
+      TaskState(sessionId, if (continuing && previous!!.phase !in TaskState.WAITING_PHASES) previous.phase else TaskPhase.THINKING,
+        if (continuing && previous!!.phase !in TaskState.WAITING_PHASES) previous.detail else "正在处理",
         if (continuing) previous!!.since else System.currentTimeMillis())
     }
     "retry" -> TaskState(sessionId, TaskPhase.THINKING, "正在重试",
       if (previous?.active == true) previous.since else System.currentTimeMillis())
     "idle" -> when {
-      previous?.active == true -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since)
+      previous?.active == true -> TaskState(sessionId, TaskPhase.COMPLETED, "任务已完成", previous.since, System.currentTimeMillis())
       previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) -> previous!!
       else -> TaskState(sessionId, TaskPhase.IDLE)
     }
@@ -229,14 +259,17 @@ object TaskReducer {
     return when (type) {
       "session.status" -> status(sessionId, properties.obj("status").str("type"), previous)
       "session.idle" -> status(sessionId, "idle", previous)
-      "session.error" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since)
-      "session.aborted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since)
+      "session.error" -> TaskState(sessionId, TaskPhase.FAILED, properties.errorMessage().ifBlank { properties.obj("error").str("message").ifBlank { "执行失败" } }, since, System.currentTimeMillis())
+      "session.aborted" -> TaskState(sessionId, TaskPhase.ABORTED, "任务已停止", since, System.currentTimeMillis())
       "permission.asked" -> TaskState(sessionId, TaskPhase.WAITING_PERMISSION, "等待权限确认", since)
       "question.asked" -> TaskState(sessionId, TaskPhase.WAITING_QUESTION, "等待你的回答", since)
       "permission.replied", "permission.rejected", "question.replied", "question.rejected" ->
         TaskState(sessionId, TaskPhase.THINKING, "继续执行", since)
       "message.part.updated" -> {
         val part = properties.obj("part")
+        val toolStatus = part.obj("state").str("status")
+        if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED) ||
+          part.str("type") == "tool" && toolStatus in setOf("completed", "error")) return previous
         when {
           part.str("type") == "reasoning" -> TaskState(sessionId, TaskPhase.THINKING, "正在思考", since)
           part.str("type") == "tool" -> {
@@ -254,6 +287,23 @@ object TaskReducer {
           else -> previous
         }
       }
+      "message.part.delta", "session.next.text.delta", "session.next.reasoning.delta" ->
+        if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) previous
+        else TaskState(sessionId, TaskPhase.THINKING, "正在生成", since)
+      "session.next.prompted", "session.next.prompt.admitted", "session.next.step.started", "session.next.retried" ->
+        status(sessionId, "running", previous)
+      "session.next.tool.called", "session.next.shell.started" -> {
+        val tool = properties.str("tool").ifBlank { if (type.endsWith("shell.started")) "shell" else properties.str("name") }
+        val phase = when {
+          tool in SUBAGENT_TOOLS -> TaskPhase.SUBAGENT
+          tool in SHELL_TOOLS && TEST_COMMAND.containsMatchIn(properties.obj("input").str("command").ifBlank { properties.str("command") }) -> TaskPhase.TESTING
+          else -> TaskPhase.TOOL
+        }
+        if (previous?.phase in setOf(TaskPhase.COMPLETED, TaskPhase.FAILED, TaskPhase.ABORTED)) previous
+        else TaskState(sessionId, phase, "正在运行 $tool", since)
+      }
+      "session.next.step.failed" -> TaskState(sessionId, TaskPhase.FAILED,
+        properties.obj("error").str("message").ifBlank { "执行失败" }, since, System.currentTimeMillis())
       else -> previous
     }
   }

@@ -1,0 +1,69 @@
+package com.igng.opencode.lagoon.core
+
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+
+class SessionExperienceTest {
+  @Test fun worktreeUsesAuthoritativeProjectIdAndKeepsItsExecutionDirectory() {
+    val session = JSONObject("""{"id":"s","title":"","projectID":"p","location":{"directory":"/trees/task"},"time":{"updated":5}}""").toSession()
+    val project = Project("p", "/project", "Project")
+    assertEquals(project, resolveSessionProject(session, listOf(project, Project("other", "/trees", "Wrong"))))
+    assertEquals("/trees/task", session.directory)
+    assertEquals("编译 Android 客户端", session.displayTitle("编译 Android 客户端\n保留历史"))
+  }
+  @Test fun directoryFallbackUsesSegmentBoundariesAndMostSpecificAncestor() {
+    val projects = listOf(Project("a", "/work/app", "A"), Project("b", "/work/app/lib", "B"))
+    assertEquals("b", resolveSessionProject(Session("s", "/work/app/lib/src", "", 0), projects)?.id)
+    assertNull(resolveSessionProject(Session("s", "/work/application", "", 0), projects))
+  }
+  @Test fun configurationRecordsAndStepMarkersDoNotBecomeVisibleBubbles() {
+    val configuration = JSONObject("""{"id":"config","type":"model-switched","model":{"providerID":"p","id":"m"},"time":{"created":1}}""").toMessage()
+    assertFalse(configuration.isDisplayable)
+    assertEquals("m", configuration.model?.modelId)
+    val step = Message("step", "assistant", 1, listOf(MessagePart("p", "step-start")))
+    assertFalse(step.isDisplayable)
+    assertEquals(SessionContent.EMPTY, listOf(configuration, step).sessionPreview().content)
+  }
+  @Test fun nativeFileAttachmentsPreserveUriMimeAndName() {
+    val message = JSONObject("""{"id":"u","type":"user","text":"查看图片","files":[{"uri":"file:///project/logo.png","mime":"image/png","name":"logo.png"}],"time":{"created":1}}""").toMessage()
+    val file = message.parts.single { it.type == "file" }
+    assertEquals("file:///project/logo.png", file.path)
+    assertEquals("image/png", file.mime)
+    assertEquals("logo.png", file.title)
+  }
+  @Test fun terminalToolSnapshotCannotRestartACompletedTask() {
+    val previous = TaskState("s", TaskPhase.COMPLETED, "done", 10, 20)
+    val result = TaskReducer.event("s", "message.part.updated", JSONObject("""{"part":{"type":"tool","tool":"bash","state":{"status":"completed"}}}"""), previous)
+    assertEquals(previous, result)
+  }
+  @Test fun finishingRecordsFinishTimeWithoutDiscardingRunStart() {
+    val completed = TaskReducer.status("s", "idle", TaskState("s", TaskPhase.THINKING, since = 10))
+    assertEquals(10L, completed.since)
+    assertNotNull(completed.finishedAt)
+    val resumed = TaskReducer.status("s", "busy", TaskState("s", TaskPhase.WAITING_PERMISSION, since = 10))
+    assertEquals(10L, resumed.since)
+  }
+  @Test fun parentAndThreeRunningChildrenCountAsOneMainTask() {
+    val tasks = mapOf("p" to TaskState("p", TaskPhase.SUBAGENT)) + (1..3).associate { "c$it" to TaskState("c$it", TaskPhase.THINKING) }
+    assertEquals(1, TaskSummary.of(tasks, parents = (1..3).associate { "c$it" to "p" }).running)
+    val waiting = tasks + ("c1" to TaskState("c1", TaskPhase.WAITING_PERMISSION))
+    val summary = TaskSummary.of(waiting, parents = (1..3).associate { "c$it" to "p" })
+    assertEquals(1, summary.waiting); assertEquals(0, summary.running)
+  }
+
+  @Test fun readParentCannotHideANewUnreadChildResult() {
+    val tasks=mapOf("parent" to TaskState("parent",TaskPhase.COMPLETED),"child" to TaskState("child",TaskPhase.FAILED))
+    assertEquals(1,TaskSummary.of(tasks,setOf("parent"),mapOf("child" to "parent")).failed)
+    assertEquals(TaskSummary.EMPTY,TaskSummary.of(tasks,setOf("parent","child"),mapOf("child" to "parent")))
+    assertEquals(TaskSummary.EMPTY,TaskSummary.of(mapOf("parent" to TaskState("parent",TaskPhase.IDLE),"child" to TaskState("child",TaskPhase.COMPLETED)),setOf("child"),mapOf("child" to "parent")))
+  }
+
+
+  @Test fun binaryReferencesKeepTheirMimeTypes() {
+    assertEquals("image/png", referenceMime("/repo/图像.PNG"))
+    assertEquals("application/pdf", referenceMime("/repo/manual.pdf"))
+    assertEquals("text/plain", referenceMime("/repo/main.kt"))
+  }
+
+}
