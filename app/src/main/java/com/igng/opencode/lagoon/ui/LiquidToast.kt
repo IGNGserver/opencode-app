@@ -81,6 +81,7 @@ fun LiquidToastHost(
             cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
             backdrop = backdrop,
             isDark = isDark,
+            mode = IosGlassMode.TINTED,
             tintColor = if (type == LiquidToastType.ERROR) MiuixColorTokens.Error else null
           )
           .clickable(

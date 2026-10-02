@@ -905,7 +905,8 @@ private fun MiuixLiquidComposer(
     // 输入舱核心 Surface (液态玻璃质感)
     LiquidGlassSurface(
       modifier = Modifier.fillMaxWidth(),
-      cornerRadius = 22.dp,
+      cornerRadius = 24.dp,
+      mode = IosGlassMode.CLEAR,
       backdrop = backdrop
     ) {
       Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
@@ -1110,6 +1111,7 @@ private fun LiquidActionCapsule(
   LiquidGlassSurface(
     cornerRadius = 14.dp,
     backdrop = backdrop,
+    mode = IosGlassMode.CLEAR,
     onClick = onClick
   ) {
     Text(

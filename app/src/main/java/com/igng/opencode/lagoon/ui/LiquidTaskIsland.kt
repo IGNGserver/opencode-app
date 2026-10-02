@@ -79,6 +79,7 @@ fun LiquidTaskIsland(
             cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
             backdrop = backdrop,
             isDark = isDark,
+            mode = IosGlassMode.TINTED,
             tintColor = if (isWaiting) MiuixColorTokens.Warning else null
           )
           .clickable(
