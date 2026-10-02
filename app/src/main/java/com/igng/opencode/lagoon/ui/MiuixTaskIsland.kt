@@ -9,27 +9,25 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.igng.opencode.lagoon.core.TaskSummary
-import com.kyant.backdrop.Backdrop
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 类似于灵动岛/超级岛的液态玻璃实时任务状态指示舱。
+ * 遵循 MIUIX 设计规范的实时任务状态指示胶囊。
  *
  * 内容为全服务器范围的统一摘要（运行中 / 未读已完成 / 待回复 / 失败），与系统通知、小米超级岛
- * 共用同一份口径（见 `core/TaskSummary.kt`），不再是单个会话的一行详情。
+ * 共用同一份口径（见 `core/TaskSummary.kt`）。使用 MIUIX 纯正卡片与实体微投影，彻底替代液态折射。
  */
 @Composable
-fun LiquidTaskIsland(
+fun MiuixTaskIsland(
   summary: TaskSummary?,
   modifier: Modifier = Modifier,
-  isDark: Boolean = false,
-  backdrop: Backdrop? = LocalBackdrop.current,
   onClick: (() -> Unit)? = null
 ) {
   val isVisible = summary != null && !summary.isEmpty
@@ -43,7 +41,6 @@ fun LiquidTaskIsland(
     modifier = modifier
   ) {
     if (summary != null) {
-      val pillShape = remember { miuixSquircleShape(LiquidGlassTokens.CapsuleCornerRadius) }
       val isRunning = summary.running > 0
       val isWaiting = summary.waiting > 0
       val isFailed = summary.failed > 0
@@ -66,28 +63,23 @@ fun LiquidTaskIsland(
         else -> MiuixColorTokens.Success
       }
 
-      Box(
+      val bgColor = when {
+        isFailed -> MiuixColorTokens.ErrorSubtle
+        isWaiting -> MiuixColorTokens.WarningSubtle
+        else -> MiuixTheme.colorScheme.surfaceContainerHigh
+      }
+
+      Card(
         modifier = Modifier
           .padding(horizontal = 16.dp, vertical = 6.dp)
-          .shadow(
-            elevation = 14.dp,
-            shape = pillShape,
-            spotColor = if (isDark) Color(0x66000000) else Color(0x30000000),
-            ambientColor = Color.Transparent
-          )
-          .liquidGlass(
-            cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
-            backdrop = backdrop,
-            isDark = isDark,
-            mode = IosGlassMode.TINTED,
-            tintColor = if (isWaiting) MiuixColorTokens.Warning else null
-          )
           .clickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
             onClick = { onClick?.invoke() }
-          )
-          .padding(horizontal = 12.dp, vertical = 6.dp)
+          ),
+        cornerRadius = 14.dp,
+        insideMargin = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        colors = CardDefaults.defaultColors(color = bgColor)
       ) {
         Row(
           verticalAlignment = Alignment.CenterVertically,
@@ -105,7 +97,7 @@ fun LiquidTaskIsland(
             text = summary.text.orEmpty(),
             style = MiuixTheme.textStyles.footnote2.copy(
               fontWeight = FontWeight.Medium,
-              color = MiuixTheme.colorScheme.onSurface
+              color = if (isFailed) MiuixColorTokens.Error else if (isWaiting) MiuixColorTokens.Warning else MiuixTheme.colorScheme.onSurface
             ),
             maxLines = 1
           )

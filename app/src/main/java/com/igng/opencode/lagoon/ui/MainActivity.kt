@@ -11,11 +11,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -36,8 +36,6 @@ import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.*
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 class MainActivity : ComponentActivity() {
   private var deepLink by mutableStateOf<Pair<String, String>?>(null)
@@ -60,10 +58,10 @@ class MainActivity : ComponentActivity() {
       var inChatDetail by rememberSaveable { mutableStateOf(false) }
       var showingServersSheet by remember { mutableStateOf(false) }
       var globalMessage by remember { mutableStateOf<String?>(null) }
-      var globalMessageType by remember { mutableStateOf(LiquidToastType.INFO) }
+      var globalMessageType by remember { mutableStateOf(MiuixToastType.INFO) }
       val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
-      // 屏幕自适应：平板/宽屏使用 NavigationRail，手机使用悬浮 Liquid Glass 底栏
+      // 屏幕自适应：平板/宽屏使用 NavigationRail，手机使用悬浮 MIUIX Dock 底栏
       val configuration = LocalConfiguration.current
       val isWideScreen = configuration.screenWidthDp >= 640
 
@@ -74,13 +72,13 @@ class MainActivity : ComponentActivity() {
       LaunchedEffect(state.error) {
         val error = state.error ?: return@LaunchedEffect
         globalMessage = error
-        globalMessageType = LiquidToastType.ERROR
+        globalMessageType = MiuixToastType.ERROR
         controller.clearError()
       }
       LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         globalMessage = message
-        globalMessageType = LiquidToastType.SUCCESS
+        globalMessageType = MiuixToastType.SUCCESS
         controller.clearMessage()
       }
       LaunchedEffect(state.serverId) {
@@ -139,42 +137,102 @@ class MainActivity : ComponentActivity() {
 
         val homeScrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
         val navIcons = listOf(MiuixIcons.VerticalSplit, MiuixIcons.Tasks, MiuixIcons.Settings)
-        val contentBackdrop = rememberLayerBackdrop()
 
-        CompositionLocalProvider(LocalBackdrop provides contentBackdrop) {
-          val stage = AppBackStack.backStage(inChatDetail, currentTab)
-          val progress = backProgress.value
-          val visualProgress = androidx.compose.animation.core.FastOutSlowInEasing.transform(progress)
+        val stage = AppBackStack.backStage(inChatDetail, currentTab)
+        val progress = backProgress.value
+        val visualProgress = androidx.compose.animation.core.FastOutSlowInEasing.transform(progress)
 
-          // 顶层采用 MIUIX 官方 Scaffold 脚手架
-          Scaffold(
-            modifier = Modifier.imePadding(),
-            topBar = {
-              if (!inChatDetail) {
-                Box(Modifier.fillMaxWidth()) {
-                  // 在从二级标签页向工作台预见式返回时，工作台的 TopBar 视差淡入露出
-                  if (stage == BackStage.TAB_TO_HOME && (gestureActive || progress > 0.01f)) {
-                    Box(
-                      Modifier
-                        .fillMaxWidth()
-                        .graphicsLayer {
-                          alpha = visualProgress
-                          translationX = -(1f - visualProgress) * 40.dp.toPx()
+        // 顶层采用 MIUIX 官方 Scaffold 脚手架
+        Scaffold(
+          modifier = Modifier.imePadding(),
+          topBar = {
+            if (!inChatDetail) {
+              Box(Modifier.fillMaxWidth()) {
+                // 在从二级标签页向工作台预见式返回时，工作台的 TopBar 视差淡入露出
+                if (stage == BackStage.TAB_TO_HOME && (gestureActive || progress > 0.01f)) {
+                  Box(
+                    Modifier
+                      .fillMaxWidth()
+                      .graphicsLayer {
+                        alpha = visualProgress
+                        translationX = -(1f - visualProgress) * 40.dp.toPx()
+                      }
+                  ) {
+                    TopAppBar(
+                      title = "工作台",
+                      largeTitle = "任务工作台",
+                      scrollBehavior = homeScrollBehavior,
+                      navigationIcon = {
+                        Card(
+                          modifier = Modifier
+                            .padding(start = 12.dp)
+                            .clickable(
+                              interactionSource = remember { MutableInteractionSource() },
+                              indication = null,
+                              onClick = { showingServersSheet = true }
+                            ),
+                          cornerRadius = 14.dp,
+                          insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                          colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
+                        ) {
+                          Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                            Box(
+                              Modifier.size(8.dp).background(
+                                if (state.connected) MiuixColorTokens.Success else MiuixColorTokens.Warning,
+                                shape = miuixSquircleShape(4.dp)
+                              )
+                            )
+                            Text(
+                              text = state.server?.name ?: "选择服务器",
+                              style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium)
+                            )
+                            Text("▾", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
+                          }
                         }
-                    ) {
+                      },
+                      actions = {
+                        IconButton(onClick = controller::reload) {
+                          Icon(imageVector = MiuixIcons.Refresh, contentDescription = "刷新")
+                        }
+                      }
+                    )
+                  }
+                }
+
+                // 当前 Tab 的 TopBar，随手势向右滑动并淡出
+                Box(
+                  Modifier
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                      if (stage == BackStage.TAB_TO_HOME) {
+                        alpha = 1f - visualProgress
+                        translationX = visualProgress * size.width * 0.85f
+                      }
+                    }
+                ) {
+                  when (currentTab) {
+                    RootTab.HOME -> {
                       TopAppBar(
                         title = "工作台",
                         largeTitle = "任务工作台",
                         scrollBehavior = homeScrollBehavior,
                         navigationIcon = {
-                          LiquidGlassSurface(
-                            modifier = Modifier.padding(start = 12.dp),
-                            cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
-                            isDark = dark,
-                            onClick = { showingServersSheet = true }
+                          Card(
+                            modifier = Modifier
+                              .padding(start = 12.dp)
+                              .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { showingServersSheet = true }
+                              ),
+                            cornerRadius = 14.dp,
+                            insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
                           ) {
                             Row(
-                              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                               verticalAlignment = Alignment.CenterVertically,
                               horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
@@ -199,90 +257,37 @@ class MainActivity : ComponentActivity() {
                         }
                       )
                     }
-                  }
-
-                  // 当前 Tab 的 TopBar，随手势向右滑动并淡出
-                  Box(
-                    Modifier
-                      .fillMaxWidth()
-                      .graphicsLayer {
-                        if (stage == BackStage.TAB_TO_HOME) {
-                          alpha = 1f - visualProgress
-                          translationX = visualProgress * size.width * 0.85f
+                    RootTab.SESSIONS -> {
+                      SmallTopAppBar(
+                        title = "全部会话",
+                        actions = {
+                          IconButton(onClick = {
+                            if (!state.protocol.supportsTitleOnCreate) {
+                              controller.createSession("") { inChatDetail = true }
+                            } else {
+                              controller.createSession("新任务") { inChatDetail = true }
+                            }
+                          }) {
+                            Icon(imageVector = MiuixIcons.Add, contentDescription = "新建会话")
+                          }
                         }
-                      }
-                  ) {
-                    when (currentTab) {
-                      RootTab.HOME -> {
-                        TopAppBar(
-                          title = "工作台",
-                          largeTitle = "任务工作台",
-                          scrollBehavior = homeScrollBehavior,
-                          navigationIcon = {
-                            LiquidGlassSurface(
-                              modifier = Modifier.padding(start = 12.dp),
-                              cornerRadius = LiquidGlassTokens.CapsuleCornerRadius,
-                              isDark = dark,
-                              onClick = { showingServersSheet = true }
-                            ) {
-                              Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                              ) {
-                                Box(
-                                  Modifier.size(8.dp).background(
-                                    if (state.connected) MiuixColorTokens.Success else MiuixColorTokens.Warning,
-                                    shape = miuixSquircleShape(4.dp)
-                                  )
-                                )
-                                Text(
-                                  text = state.server?.name ?: "选择服务器",
-                                  style = MiuixTheme.textStyles.footnote1.copy(fontWeight = FontWeight.Medium)
-                                )
-                                Text("▾", fontSize = 11.sp, color = MiuixTheme.colorScheme.onSurfaceVariantActions)
-                              }
-                            }
-                          },
-                          actions = {
-                            IconButton(onClick = controller::reload) {
-                              Icon(imageVector = MiuixIcons.Refresh, contentDescription = "刷新")
-                            }
-                          }
-                        )
-                      }
-                      RootTab.SESSIONS -> {
-                        SmallTopAppBar(
-                          title = "全部会话",
-                          actions = {
-                            IconButton(onClick = {
-                              if (!state.protocol.supportsTitleOnCreate) {
-                                controller.createSession("") { inChatDetail = true }
-                              } else {
-                                controller.createSession("新任务") { inChatDetail = true }
-                              }
-                            }) {
-                              Icon(imageVector = MiuixIcons.Add, contentDescription = "新建会话")
-                            }
-                          }
-                        )
-                      }
-                      RootTab.SETTINGS -> {
-                        SmallTopAppBar(title = "设置")
-                      }
+                      )
+                    }
+                    RootTab.SETTINGS -> {
+                      SmallTopAppBar(title = "设置")
                     }
                   }
                 }
               }
-            },
-            bottomBar = {}
-          ) { insets ->
+            }
+          },
+          bottomBar = {}
+        ) { insets ->
           Box(Modifier.fillMaxSize()) {
             Row(
               Modifier
                 .fillMaxSize()
                 .padding(top = insets.calculateTopPadding())
-                .layerBackdrop(contentBackdrop)
             ) {
               // 宽屏模式：左侧 NavigationRail
               if (isWideScreen && !inChatDetail && state.profiles.isNotEmpty()) {
@@ -435,7 +440,7 @@ class MainActivity : ComponentActivity() {
               }
             }
 
-            // 移动端/窄屏：悬浮在整个滚动视图之上的光学 Liquid Glass 导航 Dock
+            // 移动端/窄屏：悬浮在整个滚动视图之上的纯正 MIUIX 导航 Dock
             if (!isWideScreen && state.profiles.isNotEmpty() && !keyboardOpen) {
               val stage = AppBackStack.backStage(inChatDetail, currentTab)
               val progress = backProgress.value
@@ -456,17 +461,16 @@ class MainActivity : ComponentActivity() {
                       }
                     }
                 ) {
-                  LiquidGlassDock(
+                  MiuixNavigationDock(
                     selectedTab = currentTab,
                     onTabSelected = { currentTab = it },
-                    isDark = dark,
-                    backdrop = contentBackdrop
+                    isDark = dark
                   )
                 }
               }
             }
 
-            // 顶部实时运行状态灵动岛 (Live Task Island)
+            // 顶部实时运行状态指示胶囊 (Live Task Island)
             if (!state.summary.isEmpty) {
               val stage = AppBackStack.backStage(inChatDetail, currentTab)
               val progress = backProgress.value
@@ -475,10 +479,8 @@ class MainActivity : ComponentActivity() {
 
               if (showIsland) {
                 val summaryTarget = state.summaryTargetId
-                LiquidTaskIsland(
+                MiuixTaskIsland(
                   summary = state.summary,
-                  isDark = dark,
-                  backdrop = contentBackdrop,
                   onClick = {
                     // 优先跳转到未读的已完成/失败会话；否则进入当前会话详情。
                     summaryTarget?.let(controller::selectSession)
@@ -498,12 +500,10 @@ class MainActivity : ComponentActivity() {
               }
             }
 
-            // 全局液态玻璃悬浮轻提示 (Liquid Toast)
-            LiquidToastHost(
+            // 全局 MIUIX 悬浮轻提示 (Miuix Toast)
+            MiuixToastHost(
               message = globalMessage,
               type = globalMessageType,
-              isDark = dark,
-              backdrop = contentBackdrop,
               onDismiss = { globalMessage = null },
               modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -531,7 +531,6 @@ class MainActivity : ComponentActivity() {
       }
     }
   }
-}
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
