@@ -266,8 +266,14 @@ private fun MiuixEmptyActionCard(title: String, subtitle: String, action: String
       text = subtitle,
       style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
     )
-    Spacer(Modifier.height(12.dp))
-    Button(onClick = onAction, colors = ButtonDefaults.buttonColorsPrimary()) { Text(action) }
+    Spacer(Modifier.height(14.dp))
+    Button(
+      onClick = onAction,
+      cornerRadius = 18.dp,
+      colors = ButtonDefaults.buttonColorsPrimary()
+    ) {
+      Text(action)
+    }
   }
 }
 
@@ -547,7 +553,7 @@ fun NewSessionSheet(
         }
       }
 
-      Spacer(Modifier.height(10.dp))
+      Spacer(Modifier.height(12.dp))
       Button(
         onClick = {
           val promptText = prompt.trim()
@@ -555,6 +561,7 @@ fun NewSessionSheet(
         },
         enabled = !state.pending("create") && state.connected && !state.cached && prompt.isNotBlank() && state.project != null,
         modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 18.dp,
         colors = ButtonDefaults.buttonColorsPrimary()
       ) {
         Text(if (state.pending("create")) "正在创建…" else "开始任务")
@@ -574,25 +581,22 @@ fun NewSessionSheet(
 @Composable
 private fun SelectChip(label: String, selected: Boolean, onClick: () -> Unit) {
   Card(
-    modifier = Modifier.clickable(
-      interactionSource = remember { MutableInteractionSource() },
-      indication = androidx.compose.foundation.LocalIndication.current,
-      onClick = onClick
-    ),
-    cornerRadius = 14.dp,
-    insideMargin = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+    modifier = Modifier.padding(end = 6.dp),
+    pressFeedbackType = PressFeedbackType.Sink,
+    showIndication = true,
+    cornerRadius = 18.dp,
+    insideMargin = PaddingValues(horizontal = 14.dp, vertical = 7.dp),
     colors = CardDefaults.defaultColors(
       color = if (selected) MiuixColorTokens.PrimarySubtle else MiuixTheme.colorScheme.secondaryContainer
-    )
+    ),
+    onClick = onClick
   ) {
     Text(
       text = label,
-      style = MiuixTheme.textStyles.footnote2.copy(
-        color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface,
-        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
-      ),
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis
+      style = MiuixTheme.textStyles.footnote1.copy(
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
+      )
     )
   }
 }
@@ -732,12 +736,14 @@ fun ServersModal(
                 Button(
                   onClick = { controller.connect(profile.id); onConnected() },
                   enabled = profile.id != state.serverId || !state.connected,
+                  cornerRadius = 16.dp,
                   colors = ButtonDefaults.buttonColorsPrimary()
                 ) {
                   Text("连接")
                 }
                 Button(
                   onClick = { editing = profile; showForm = true },
+                  cornerRadius = 16.dp,
                   colors = ButtonDefaults.buttonColors()
                 ) {
                   Text("编辑")
@@ -923,14 +929,17 @@ private fun MiuixServerForm(
 
     item {
       Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
       ) {
-        TextButton(
-          text = "取消",
+        Button(
           onClick = onCancel,
-          modifier = Modifier.weight(1f)
-        )
+          modifier = Modifier.weight(1f),
+          cornerRadius = 18.dp,
+          colors = ButtonDefaults.buttonColors()
+        ) {
+          Text("取消")
+        }
         Button(
           onClick = {
             working = true
@@ -946,7 +955,8 @@ private fun MiuixServerForm(
           },
           enabled = !working && name.isNotBlank() &&
               (normalizedInput.startsWith("https://", true) || (normalizedInput.startsWith("http://", true) && allowHttp)),
-          modifier = Modifier.weight(2f),
+          modifier = Modifier.weight(1.6f),
+          cornerRadius = 18.dp,
           colors = ButtonDefaults.buttonColorsPrimary()
         ) {
           Text(if (working) "正在测试…" else "保存并连接")
@@ -986,19 +996,24 @@ fun SettingsScreen(
     modifier = Modifier
       .fillMaxSize()
       .overScrollVertical(),
-    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
-    verticalArrangement = Arrangement.spacedBy(14.dp)
+    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 48.dp),
+    verticalArrangement = Arrangement.spacedBy(16.dp)
   ) {
-    item { MiuixSectionHeader("当前连接") }
+    // 1. 网络与连接
     item {
-      Card(insideMargin = PaddingValues(16.dp)) {
+      MiuixSectionHeader("网络与连接")
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp,
+        insideMargin = PaddingValues(16.dp)
+      ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
           Column(Modifier.weight(1f)) {
             Text(
               state.server?.name ?: "未连接服务器",
               style = MiuixTheme.textStyles.headline1.copy(fontWeight = FontWeight.SemiBold)
             )
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
               if (state.connected) "OpenCode ${state.version.ifBlank { "V2" }} · 正常通信中" else "离线或尚未连接",
               style = MiuixTheme.textStyles.footnote1.copy(
@@ -1008,6 +1023,7 @@ fun SettingsScreen(
           }
           Button(
             onClick = onManageServers,
+            cornerRadius = 18.dp,
             colors = ButtonDefaults.buttonColorsPrimary()
           ) {
             Text("管理服务器")
@@ -1016,103 +1032,173 @@ fun SettingsScreen(
       }
     }
 
-    item { MiuixSectionHeader("界面与系统") }
+    // 2. 显示与交互
     item {
-      Card {
-        Column(Modifier.padding(16.dp)) {
-          Text("外观", style = MiuixTheme.textStyles.headline2)
-          Row(Modifier.fillMaxWidth()) { ThemeMode.entries.forEach { mode -> SelectChip(mode.label, themeMode == mode) { onTheme(mode) } } }
-          SuperSwitch(title = "返回手势预览", summary = "拖动返回手势时轻微预览上一级页面", checked = previewBack, onCheckedChange = onPreviewBack)
-        }
-      }
-    }
-
-    item { MiuixSectionHeader("通知与超级岛") }
-    item {
-      Card(insideMargin = PaddingValues(16.dp)) {
-        Text("系统通知与灵动岛 / 超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
-        Spacer(Modifier.height(4.dp))
-        Text(
-          "常驻显示全服务器任务的「运行中 / 已完成 / 待回复 / 失败」计数，并按设备能力分发到各厂商灵动岛。",
-          style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-        )
-        Spacer(Modifier.height(10.dp))
-        Button(
-          onClick = onNotifications,
-          colors = ButtonDefaults.buttonColors()
-        ) {
-          Text("检查 / 授予通知权限")
-        }
-      }
-    }
-
-    item { MiuixSectionHeader("灵动岛适配") }
-    item {
-      Card(insideMargin = PaddingValues(16.dp)) {
-        val list = islandSupport
-        if (list == null) {
-          Text("正在检测本机灵动岛能力…", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
-        } else {
-          list.forEachIndexed { index, item ->
-            if (index > 0) Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+      MiuixSectionHeader("显示与交互")
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp,
+        insideMargin = PaddingValues(0.dp)
+      ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+          Text(
+            text = "深浅色外观",
+            style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium)
+          )
+          Spacer(Modifier.height(10.dp))
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .background(MiuixTheme.colorScheme.secondaryContainer, miuixSquircleShape(14.dp))
+              .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+          ) {
+            ThemeMode.entries.forEach { mode ->
+              val isSelected = themeMode == mode
               Box(
-                Modifier.size(8.dp).background(
+                modifier = Modifier
+                  .weight(1f)
+                  .clip(miuixSquircleShape(10.dp))
+                  .background(if (isSelected) MiuixTheme.colorScheme.surface else Color.Transparent)
+                  .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = { onTheme(mode) }
+                  )
+                  .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center
+              ) {
+                Text(
+                  text = mode.label,
+                  style = MiuixTheme.textStyles.footnote1.copy(
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (isSelected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
+                  )
+                )
+              }
+            }
+          }
+        }
+        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+        SuperSwitch(
+          title = "返回手势预览",
+          summary = "拖动返回手势时轻微预览上一级页面",
+          checked = previewBack,
+          onCheckedChange = onPreviewBack
+        )
+      }
+    }
+
+    // 3. 超级岛与通知
+    item {
+      MiuixSectionHeader("超级岛与通知")
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp,
+        insideMargin = PaddingValues(0.dp)
+      ) {
+        Column(Modifier.padding(16.dp)) {
+          Text("系统通知与超级岛展示", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
+          Spacer(Modifier.height(4.dp))
+          Text(
+            "常驻显示全服务器任务的「运行中 / 已完成 / 待回复 / 失败」计数，并分发到系统超级岛/灵动岛胶囊。无论深浅色主题，灵动岛均保持极深色呈现。",
+            style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+          )
+          Spacer(Modifier.height(12.dp))
+          Button(
+            onClick = onNotifications,
+            cornerRadius = 18.dp,
+            colors = ButtonDefaults.buttonColors()
+          ) {
+            Text("检查 / 授予通知权限")
+          }
+        }
+        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+        Column(Modifier.padding(16.dp)) {
+          Text("灵动岛通道适配状态", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium))
+          Spacer(Modifier.height(10.dp))
+          val list = islandSupport
+          if (list == null) {
+            Text("正在检测本机灵动岛能力…", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+          } else {
+            list.forEachIndexed { index, item ->
+              if (index > 0) Spacer(Modifier.height(12.dp))
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                  Modifier.size(8.dp).background(
+                    when {
+                      !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                      item.granted -> MiuixColorTokens.Success
+                      else -> MiuixColorTokens.Warning
+                    },
+                    miuixSquircleShape(4.dp)
+                  )
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(item.label, style = MiuixTheme.textStyles.body2.copy(fontWeight = FontWeight.Medium))
+                Spacer(Modifier.weight(1f))
+                Text(
                   when {
-                    !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-                    item.granted -> MiuixColorTokens.Success
-                    else -> MiuixColorTokens.Warning
+                    !item.supported -> "不支持"
+                    item.granted -> "已就绪"
+                    else -> "待授权"
                   },
-                  miuixSquircleShape(4.dp)
+                  style = MiuixTheme.textStyles.footnote1.copy(
+                    color = when {
+                      !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
+                      item.granted -> MiuixColorTokens.Success
+                      else -> MiuixColorTokens.Warning
+                    }
+                  )
                 )
-              )
-              Spacer(Modifier.width(8.dp))
-              Text(item.label, style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.Medium))
-              Spacer(Modifier.weight(1f))
-              Text(
-                when {
-                  !item.supported -> "不支持"
-                  item.granted -> "已就绪"
-                  else -> "待授权"
+              }
+              Spacer(Modifier.height(2.dp))
+              Text(item.note, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+            }
+            val promoted = list.firstOrNull { it.vendor == "android" && it.supported && !it.granted }
+            if (promoted != null) {
+              Spacer(Modifier.height(12.dp))
+              Button(
+                onClick = {
+                  TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } }
                 },
-                style = MiuixTheme.textStyles.footnote1.copy(
-                  color = when {
-                    !item.supported -> MiuixTheme.colorScheme.onSurfaceVariantSummary
-                    item.granted -> MiuixColorTokens.Success
-                    else -> MiuixColorTokens.Warning
-                  }
-                )
-              )
+                cornerRadius = 18.dp,
+                colors = ButtonDefaults.buttonColorsPrimary()
+              ) {
+                Text("开启实时更新权限")
+              }
             }
-            Spacer(Modifier.height(3.dp))
-            Text(item.note, style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+            Spacer(Modifier.height(10.dp))
+            Text("荣耀灵动胶囊、ColorOS 15 流体云暂未完成接入，当前不可用。", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
           }
-          val promoted = list.firstOrNull { it.vendor == "android" && it.supported && !it.granted }
-          if (promoted != null) {
-            Spacer(Modifier.height(12.dp))
-            Button(
-              onClick = {
-                TaskNotifications(context).promotedNotificationSettingsIntent()?.let { runCatching { context.startActivity(it) } }
-              },
-              colors = ButtonDefaults.buttonColorsPrimary()
-            ) {
-              Text("开启实时更新权限")
-            }
-          }
-          Spacer(Modifier.height(14.dp))
-          Text("荣耀灵动胶囊、ColorOS 15 流体云暂未完成接入，当前不可用。", style = MiuixTheme.textStyles.footnote2.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
         }
       }
     }
 
-    item { MiuixSectionHeader("应用与诊断") }
-    item { Card(insideMargin = PaddingValues(16.dp)) {
-      Text("OpenCode Lagoon ${packageInfo.versionName} (${if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()})", style = MiuixTheme.textStyles.headline2)
-      Text("服务器接口：${state.protocol} · ${if (state.connected) "可连接" else "未连接"}\n实时同步：${if (state.streamConnected) "正常" else "恢复中"} · ${if (state.degraded || state.cached) "数据待更新" else "数据已同步"}", style = MiuixTheme.textStyles.footnote1)
-      TextButton(text = "复制诊断信息", onClick = {
-        clipboard.setText(AnnotatedString("OpenCode Lagoon ${packageInfo.versionName}\nAndroid ${android.os.Build.VERSION.RELEASE} / API ${android.os.Build.VERSION.SDK_INT}\n${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\nprotocol=${state.protocol}, api=${state.connected}, stream=${state.streamConnected}, stale=${state.degraded}, cached=${state.cached}\ncapabilitiesDocumented=${state.capabilities.documented}, sessions=${state.sessions.size}, messages=${state.messages.size}"))
-      })
-    } }
-
+    // 4. 关于与诊断
+    item {
+      MiuixSectionHeader("关于与诊断")
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp,
+        insideMargin = PaddingValues(16.dp)
+      ) {
+        Text("OpenCode Lagoon ${packageInfo.versionName} (${if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()})", style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold))
+        Spacer(Modifier.height(4.dp))
+        Text("服务器接口：${state.protocol} · ${if (state.connected) "可连接" else "未连接"}\n实时同步：${if (state.streamConnected) "正常" else "恢复中"} · ${if (state.degraded || state.cached) "数据待更新" else "数据已同步"}", style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary))
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+          Button(
+            onClick = {
+              clipboard.setText(AnnotatedString("OpenCode Lagoon ${packageInfo.versionName}\nAndroid ${android.os.Build.VERSION.RELEASE} / API ${android.os.Build.VERSION.SDK_INT}\n${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\nprotocol=${state.protocol}, api=${state.connected}, stream=${state.streamConnected}, stale=${state.degraded}, cached=${state.cached}\ncapabilitiesDocumented=${state.capabilities.documented}, sessions=${state.sessions.size}, messages=${state.messages.size}"))
+            },
+            cornerRadius = 16.dp,
+            colors = ButtonDefaults.buttonColors()
+          ) {
+            Text("复制诊断信息")
+          }
+        }
+      }
+    }
   }
 }

@@ -153,8 +153,13 @@ class MainActivity : ComponentActivity() {
       }
       OpenCodeMiuixTheme(dark) {
         val homeScroll = MiuixScrollBehavior(rememberTopAppBarState())
-        Scaffold(modifier = Modifier.imePadding(), topBar = {}, bottomBar = {}) { insets ->
-          Box(Modifier.fillMaxSize().padding(insets).background(MiuixTheme.colorScheme.background)) {
+        Scaffold(
+          modifier = Modifier.imePadding(),
+          contentWindowInsets = WindowInsets(0, 0, 0, 0),
+          topBar = {},
+          bottomBar = {}
+        ) { insets ->
+          Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background)) {
             if (gestureActive && inChatDetail) {
               val parent = sessionStack.dropLast(1).lastOrNull()?.let { snapshots["${state.serverId}:$it"] }
               Column(Modifier.fillMaxSize().padding(24.dp)) {
