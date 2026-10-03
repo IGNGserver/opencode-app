@@ -33,7 +33,7 @@ object PairLinkResolver {
   suspend fun resolve(value: String): PairResolution = withContext(Dispatchers.IO) {
     val input = requireNotNull(value.trim().toHttpUrlOrNull()) { "配对链接无效" }
     // The one-time pairing token is a bearer credential; never send it over cleartext unless the
-    // target is the local loopback (tests/dev). This mirrors the gate in PushRegistration.register.
+    // target is the local loopback (tests/dev).
     require(input.scheme == "https" || HttpOrigin.allowsCleartext(input.host)) {
       "配对链接必须使用 HTTPS"
     }

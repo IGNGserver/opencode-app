@@ -10,10 +10,7 @@ data class ServerProfile(
   val username: String = "opencode",
   val autoConnect: Boolean = true,
   val notifications: Boolean = true,
-  val companionUrl: String = "",
   val allowCleartext: Boolean = false,
-  /** Shared HMAC key used to authenticate companion push messages; not a login credential. */
-  val pluginSecret: String = "",
   /** 启用荣耀灵动胶囊通道（需荣耀白名单，默认关闭）。 */
   val islandHonor: Boolean = false,
   /** 启用 OPPO ColorOS 15 流体云通道（需 serviceId，默认关闭）。 */

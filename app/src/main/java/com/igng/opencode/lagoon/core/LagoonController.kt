@@ -136,7 +136,6 @@ class LagoonController private constructor(private val appContext: Context) {
   private val draftWrites = mutableMapOf<String, Job>()
 
   init {
-    com.igng.opencode.lagoon.push.PushRevocations(appContext).retry()
     // Single publisher for the server-wide island summary, so the system notification never drifts
     // from the in-app island: both read the same derived `summary` on every state emission.
     scope.launch { state.collect { state ->
@@ -162,11 +161,6 @@ class LagoonController private constructor(private val appContext: Context) {
   fun clearMessage() = mutable.update { it.copy(message = null) }
 
   fun saveServer(profile: ServerProfile, password: String?, cookie: String? = null, credentialUsername: String? = null, connect: Boolean = true) {
-    val old = store.profiles().firstOrNull { it.id == profile.id }
-    if (old != null && old.companionUrl.isNotBlank() &&
-      (!profile.notifications || old.url != profile.url || old.companionUrl != profile.companionUrl || old.pluginSecret != profile.pluginSecret)) {
-      com.igng.opencode.lagoon.push.PushRevocations(appContext).enqueue(old, store.credentials(old.id), store.deviceId())
-    }
     store.save(profile, password, cookie, credentialUsername)
     mutable.update { it.copy(profiles = store.profiles()) }
     if (connect) connect(profile.id)
@@ -177,8 +171,6 @@ class LagoonController private constructor(private val appContext: Context) {
     mutable.update { it.copy(profiles = store.profiles()) }
   }
   fun deleteServer(id: String) {
-    // Capture the profile before deletion so the companion can be told to stop delivering (A08).
-    val leaving = store.profiles().firstOrNull { it.id == id }
     if (mutable.value.serverId == id) {
       stream?.cancel()
       refresh?.cancel()
@@ -189,7 +181,6 @@ class LagoonController private constructor(private val appContext: Context) {
       api = null
       lastEventId = ""
     }
-    leaving?.let { com.igng.opencode.lagoon.push.PushRevocations(appContext).enqueue(it, store.credentials(id), store.deviceId()) }
     store.delete(id)
     cache.delete(id)
 
@@ -225,7 +216,6 @@ class LagoonController private constructor(private val appContext: Context) {
         loadAll(token)
         if (token == generation) {
           startStream(token)
-          registerPushIfConfigured(profile)
         }
       } catch (error: Exception) {
         if (error is CancellationException) throw error
@@ -779,7 +769,7 @@ class LagoonController private constructor(private val appContext: Context) {
     if (current.tasks[session]?.phase !in TERMINAL_PHASES || observedTerminal[session] != current.tasks[session]?.since || session in current.acknowledged) return
     store.acknowledgeTask(server, session)
     mutable.update { withSummary(it.copy(acknowledged = it.acknowledged + session)) }
-    notifications.cancelLocal(server, session)
+    notifications.cancel(server, session)
   }
   private fun <T> Result<List<T>>.resourceStatus(): ResourceStatus = fold(
     { ResourceStatus(if (it.isEmpty()) ResourceState.EMPTY else ResourceState.READY) },
@@ -983,24 +973,6 @@ class LagoonController private constructor(private val appContext: Context) {
     check(rule in op.snapshot.savedPermissions.orEmpty())
     op.client.revokePermission(rule.id)
     op.commit { it.copy(savedPermissions = it.savedPermissions?.filterNot { old -> old.id == rule.id }) }
-  }
-  fun registerPush(token: String) = act { op ->
-    val profile = op.snapshot.server ?: error("先连接服务器")
-    com.igng.opencode.lagoon.push.PushRegistration(appContext).register(profile, store.credentials(profile.id), token, store.deviceId())
-  }
-  /** Best-effort device (re-)registration whenever a push-configured profile connects, so token
-   *  rotation or a fresh install does not silently stop background pushes. */
-  private fun registerPushIfConfigured(profile: ServerProfile) {
-    if (profile.companionUrl.isBlank() || !profile.notifications) return
-    val registration = com.igng.opencode.lagoon.push.PushRegistration(appContext)
-    if (!registration.available()) return
-    com.google.firebase.messaging.FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-      scope.launch {
-        attempt {
-          com.igng.opencode.lagoon.push.PushRegistration(appContext).register(profile, store.credentials(profile.id), token, store.deviceId())
-        }.onFailure { Diagnostics.warn("Push", "连接后自动注册设备失败", it) }
-      }
-    }
   }
   private fun withSession(action: String, block: suspend (OperationContext, OpenCodeApi, Session) -> Unit) = act(action) { op ->
     val session = op.snapshot.session ?: error("先打开会话")

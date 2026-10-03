@@ -44,15 +44,6 @@ data class TaskSummary(
   companion object {
     val EMPTY = TaskSummary()
 
-    /** Builds counts from a session id to phase-name map, ignoring phases this build does not know. */
-    fun fromPhaseNames(phases: Map<String, String>, acknowledged: Set<String> = emptySet()): TaskSummary = of(
-      phases.mapNotNull { (id, name) ->
-        val phase = runCatching { TaskPhase.valueOf(name) }.getOrNull() ?: return@mapNotNull null
-        id to TaskState(id, phase)
-      }.toMap(),
-      acknowledged
-    )
-
     /**
      * @param acknowledged 已被用户查看过、不再计入“未读已完成/失败”的会话 id。
      */

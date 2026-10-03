@@ -3,7 +3,6 @@ plugins {
   id("org.jetbrains.kotlin.android")
   id("org.jetbrains.kotlin.plugin.compose")
 }
-if (file("google-services.json").exists()) pluginManager.apply("com.google.gms.google-services")
 
 // Local release builds may use the debug key for verification. Every publishing build sets
 // REQUIRE_RELEASE_SIGNING and must use the protected keystore and fixed certificate.
@@ -75,7 +74,6 @@ dependencies {
   implementation("com.squareup.okhttp3:okhttp:4.12.0")
   implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-  implementation("com.google.firebase:firebase-messaging:25.0.1")
   implementation("io.github.kyant0:shapes-android:1.2.0")
   implementation("top.yukonga.miuix.kmp:miuix-android:0.8.8")
   implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.8.8")

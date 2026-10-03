@@ -70,8 +70,7 @@ class OpenCodeApi(
     // Never let OkHttp's default redirect policy replay an authenticated request to a different
     // scheme/host/port: a trusted server (or its proxy) could otherwise reflect the Authorization
     // header or the raw Cookie onto a downgraded or unrelated origin before we ever check the final
-    // URL. The companion client below is the only one allowed to follow redirects, and it enforces
-    // this bound itself.
+    // URL.
     .followRedirects(false)
     .followSslRedirects(false)
     .addInterceptor { chain ->
