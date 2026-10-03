@@ -4,7 +4,6 @@
 *.iml
 local.properties
 **/build/
-app/google-services.json
 *.jks
 *.keystore
 *.p12

@@ -1,5 +1,5 @@
 {
-  "description": "Shared notification-phase contract for the Android TaskReducer and the companion mapEvent. For each case both implementations must yield the same resulting phase. 'expectedPhase' is the phase after applying the event; a no-op transition is normalized to the previous phase (or IDLE when there was none).",
+  "description": "Notification-phase contract for the Android TaskReducer. 'expectedPhase' is the phase after applying the event; a no-op transition is normalized to the previous phase (or IDLE when there was none).",
   "phases": ["IDLE", "THINKING", "TOOL", "SUBAGENT", "TESTING", "WAITING_PERMISSION", "WAITING_QUESTION", "COMPLETED", "FAILED", "ABORTED", "DISCONNECTED"],
   "cases": [
     { "name": "permission asked moves to waiting",

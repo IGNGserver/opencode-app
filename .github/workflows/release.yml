@@ -61,29 +61,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 设置 Node.js 20
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: companion/package-lock.json
-
-      - name: 注入签名和可选 Firebase 配置
+      - name: 注入签名
         env:
           KEYSTORE_BASE64: ${{ secrets.OPENCODE_LAGOON_KEYSTORE_BASE64 }}
-          FIREBASE_CONFIG_BASE64: ${{ secrets.OPENCODE_LAGOON_FIREBASE_CONFIG_BASE64 }}
         run: |
           set -euo pipefail
           test -n "$KEYSTORE_BASE64" || { echo "预发布和正式版都需要稳定签名" >&2; exit 1; }
           umask 077
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/opencode-release.jks"
           echo "OPENCODE_LAGOON_KEYSTORE_FILE=$RUNNER_TEMP/opencode-release.jks" >> "$GITHUB_ENV"
-          if [[ -n "$FIREBASE_CONFIG_BASE64" ]]; then
-            printf '%s' "$FIREBASE_CONFIG_BASE64" | base64 --decode > app/google-services.json
-            echo "PUSH_VARIANT=包含 Firebase 配置" >> "$GITHUB_ENV"
-          else
-            echo "PUSH_VARIANT=不含 FCM；配置伴随服务地址不能启用编译期缺失的推送能力" >> "$GITHUB_ENV"
-          fi
 
       - name: 构建并验证 Android
         timeout-minutes: 25
@@ -99,13 +85,6 @@ jobs:
           echo "OPENCODE_LAGOON_VERSION_CODE=$OPENCODE_LAGOON_VERSION_CODE" >> "$GITHUB_ENV"
           echo "OPENCODE_LAGOON_VERSION_NAME=$OPENCODE_LAGOON_VERSION_NAME" >> "$GITHUB_ENV"
           ANDROID_HOME="$ANDROID_SDK_ROOT" ./gradlew :app:testDebugUnitTest :app:assembleRelease
-
-      - name: 验证 companion
-        timeout-minutes: 10
-        working-directory: companion
-        run: |
-          npm ci
-          npm test
 
       - name: 定位构建产物
         id: apk
@@ -198,8 +177,6 @@ jobs:
               echo "这是 OpenCode Lagoon 预发布版本，用于验证本次更新。"
             fi
             echo
-            echo "推送变体：$PUSH_VARIANT"
-            echo
             echo "## 本次更新"
             echo
             # 版本说明文件以「## 本次更新」开头，这里只保留其后的正文，避免标题重复。
@@ -213,7 +190,6 @@ jobs:
             echo "## 自动验证"
             echo
             echo "- Android 单元测试和 APK 构建已由 GitHub Actions 执行。"
-            echo "- companion 测试已由 GitHub Actions 执行。"
           } > release-notes.md
 
       - name: 发布 GitHub Release
@@ -258,4 +234,4 @@ jobs:
 
       - name: 清理 runner 签名材料
         if: always()
-        run: rm -f "$RUNNER_TEMP/opencode-release.jks" app/google-services.json
+        run: rm -f "$RUNNER_TEMP/opencode-release.jks"

@@ -36,8 +36,6 @@ class TaskNotifications(private val context: Context) {
     const val COMPLETED = "task_completed"
     const val SUMMARY = "task_summary"
     fun notificationId(serverId: String, sessionId: String): Int = "${serverId}:$sessionId".hashCode() and 0x7fffffff
-    /** Push and foreground events share the same session notification identity. */
-    fun pushNotificationId(serverId: String, sessionId: String): Int = notificationId(serverId, sessionId)
     /** One server-wide island/summary notification per server. */
     fun summaryId(serverId: String): Int = "summary:$serverId".hashCode() and 0x7fffffff
   }
@@ -134,11 +132,8 @@ class TaskNotifications(private val context: Context) {
     if (!store.claimNotification(profile.id, next, signature)) return
     manager.notify(notificationId(profile.id, session.id), build(profile, session, next, permission))
   }
-  fun showPush(notificationId: Int, profile: ServerProfile, session: Session, state: TaskState) = show(profile, session, state)
-  fun cancelLocal(serverId: String, sessionId: String) = manager.cancel(notificationId(serverId, sessionId))
   fun cancel(serverId: String, sessionId: String) {
     manager.cancel(notificationId(serverId, sessionId))
-    manager.cancel(pushNotificationId(serverId, sessionId))
   }
 
   /**

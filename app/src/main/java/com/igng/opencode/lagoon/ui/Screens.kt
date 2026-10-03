@@ -28,9 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
-import com.google.firebase.messaging.FirebaseMessaging
 import com.igng.opencode.lagoon.core.*
-import com.igng.opencode.lagoon.push.PushRegistration
 import com.igng.opencode.lagoon.system.IslandRegistry
 import com.igng.opencode.lagoon.system.IslandSupport
 import com.igng.opencode.lagoon.system.TaskNotifications
@@ -797,12 +795,10 @@ private fun MiuixServerForm(
   var url by remember(existing?.id) { mutableStateOf(existing?.url ?: "") }
   var username by rememberSaveable(existing?.id) { mutableStateOf(existing?.username ?: "opencode") }
   var password by remember(existing?.id) { mutableStateOf("") }
-  var companion by rememberSaveable(existing?.id) { mutableStateOf(existing?.companionUrl ?: "") }
-  var pluginSecret by remember(existing?.id) { mutableStateOf(existing?.pluginSecret ?: "") }
   var autoConnect by rememberSaveable(existing?.id) { mutableStateOf(existing?.autoConnect ?: true) }
   var notifications by rememberSaveable(existing?.id) { mutableStateOf(existing?.notifications ?: true) }
   var allowHttp by rememberSaveable(existing?.id) { mutableStateOf(existing?.allowCleartext == true) }
-  var showAdvanced by remember { mutableStateOf(existing?.companionUrl?.isNotBlank() == true || existing?.allowCleartext == true) }
+  var showAdvanced by remember { mutableStateOf(existing?.allowCleartext == true) }
   var result by remember { mutableStateOf("") }
   var working by remember { mutableStateOf(false) }
 
@@ -892,32 +888,13 @@ private fun MiuixServerForm(
 
     item {
       SuperArrow(
-        title = "高级与推送设置",
-        summary = if (showAdvanced) "收起额外配置" else "伴随插件与网络模式",
+        title = "高级与网络设置",
+        summary = if (showAdvanced) "收起额外配置" else "连接与通知行为",
         onClick = { showAdvanced = !showAdvanced }
       )
     }
 
     if (showAdvanced) {
-      item {
-        TextField(
-          value = companion,
-          onValueChange = { text: String -> companion = text },
-          label = "离线推送插件地址 (可选)",
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-          modifier = Modifier.fillMaxWidth()
-        )
-      }
-      item {
-        TextField(
-          value = pluginSecret,
-          onValueChange = { text: String -> pluginSecret = text },
-          label = "推送验证密钥 (OPENCODE_LAGOON_PUSH_SECRET)",
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-          visualTransformation = PasswordVisualTransformation(),
-          modifier = Modifier.fillMaxWidth()
-        )
-      }
       item {
         SuperSwitch(
           title = "自动连接此服务器",
@@ -932,7 +909,6 @@ private fun MiuixServerForm(
           onCheckedChange = { notifications = it }
         )
       }
-
     }
 
     if (result.isNotBlank()) {
@@ -961,7 +937,7 @@ private fun MiuixServerForm(
             val normalizedUrl = normalizedInput.trimEnd('/')
             val profile = (existing ?: ServerProfile(id, "", "")).copy(
               name = name.trim().ifBlank { "OpenCode" }, url = normalizedUrl, username = username.trim().ifBlank { "opencode" }, autoConnect = autoConnect, notifications = notifications,
-              companionUrl = companion.trim().trimEnd('/'), allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp, pluginSecret = pluginSecret.trim()
+              allowCleartext = normalizedUrl.startsWith("http://", true) && allowHttp
             )
             onSave(profile, password.takeIf { it.isNotBlank() || existing == null }) { message ->
               result = message
@@ -992,7 +968,6 @@ fun SettingsScreen(
   onManageServers: () -> Unit
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
-  val pushAvailable = remember(state.serverId) { PushRegistration(context).available() }
   // 各厂商灵动岛 / 标准通道的可用状态。检测会读取系统设置与通知服务，放到 IO 线程执行。
   var islandSupport by remember { mutableStateOf<List<IslandSupport>?>(null) }
   val lifecycleOwner = LocalLifecycleOwner.current
@@ -1130,28 +1105,6 @@ fun SettingsScreen(
       }
     }
 
-    item { MiuixSectionHeader("离线后台推送 (FCM)") }
-    item {
-      Card(insideMargin = PaddingValues(16.dp)) {
-        Text(
-          if (pushAvailable) "Firebase FCM 推送环境已就绪" else "后台推送未配置（前台活跃时正常通知）",
-          style = MiuixTheme.textStyles.headline2.copy(fontWeight = FontWeight.SemiBold)
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-          "若希望完全退出应用后仍能收到任务完成或权限等待通知，需配置伴随插件 companion 与 Firebase 凭据。",
-          style = MiuixTheme.textStyles.footnote1.copy(color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-        )
-        Spacer(Modifier.height(10.dp))
-        Button(
-          onClick = { FirebaseMessaging.getInstance().token.addOnSuccessListener(controller::registerPush) },
-          enabled = pushAvailable && state.server?.companionUrl?.isNotBlank() == true,
-          colors = ButtonDefaults.buttonColorsPrimary()
-        ) {
-          Text("注册当前设备到此服务器")
-        }
-      }
-    }
     item { MiuixSectionHeader("应用与诊断") }
     item { Card(insideMargin = PaddingValues(16.dp)) {
       Text("OpenCode Lagoon ${packageInfo.versionName} (${if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()})", style = MiuixTheme.textStyles.headline2)

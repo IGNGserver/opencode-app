@@ -5,7 +5,6 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import com.igng.opencode.lagoon.push.PushMessageVerifier
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -188,7 +187,7 @@ class OpenCodeApiTest {
     }
   }
 
-  /** The same fixture drives companion/test/server.test.mjs, keeping both task reducers in lockstep. */
+  /** Contract validation for TaskReducer phase transitions. */
   @Test fun taskReducerMatchesSharedContract() {    val fixture = JSONObject(java.io.File("docs/task-event-contract.json").readText())
     val cases = fixture.getJSONArray("cases")
     for (index in 0 until cases.length()) {
@@ -337,39 +336,6 @@ class OpenCodeApiTest {
       assertEquals("/api/session/ses-1/revert/clear", server.takeRequest().requestUrl?.encodedPath)
       assertEquals(3, server.requestCount)
     }
-  }
-
-  @Test fun pushSignatureMatchesCompanionVector() {
-    val v1 = mapOf(
-      "sessionId" to "ses-1", "serverId" to "srv-1", "phase" to "WAITING_PERMISSION",
-      "detail" to "等待权限确认", "title" to "构建"
-    )
-    // Vector cross-checked against companion signPushPayloadV1('topsecret', ...).
-    assertEquals("yO0ubha7-M4U66aWoIeWbSdk7z0sVsQtcvVZhB-1Who", PushMessageVerifier.signV1("topsecret", v1))
-    assertFalse(PushMessageVerifier.verify("topsecret", v1 + ("sig" to PushMessageVerifier.signV1("topsecret", v1))))
-    assertEquals(false, PushMessageVerifier.verify("topsecret", v1))
-    assertFalse(PushMessageVerifier.verify("", v1))
-  }
-
-  @Test fun v3PushSignatureBindsDirectoryDeviceSequenceAndFreshness() {
-    val fixed = mapOf(
-      "version" to "3", "sessionId" to "ses-1", "serverId" to "srv-1", "directory" to "/repo",
-      "phase" to "WAITING_PERMISSION", "detail" to "等待权限确认", "title" to "构建", "deviceId" to "dev-1", "ts" to "1700000000000", "sequence" to "7"
-    )
-    // Vector cross-checked against companion signPushPayload('topsecret', ...). sign() ignores freshness.
-    assertEquals("xR2aa8hjbYV9Vd6uIDVIt_ZJDxiwP0okKYJQ3fDMiQU", PushMessageVerifier.sign("topsecret", fixed))
-    val now = System.currentTimeMillis().toString()
-    val fresh = fixed + ("ts" to now)
-    assertTrue(PushMessageVerifier.verify("topsecret", fresh + ("sig" to PushMessageVerifier.sign("topsecret", fresh))))
-    // A rewritten routing field invalidates a signature captured for another directory.
-    assertFalse(PushMessageVerifier.verify("topsecret", fresh + ("directory" to "/other") + ("sig" to PushMessageVerifier.sign("topsecret", fresh))))
-    // A stale (replayed) message is rejected.
-    assertFalse(PushMessageVerifier.verify("topsecret", fixed + ("sig" to PushMessageVerifier.sign("topsecret", fixed))))
-    // A field containing a newline cannot imitate a field boundary.
-    val boundary = mapOf("version" to "3", "sessionId" to "ses-1", "serverId" to "srv-1", "directory" to "/repo\nphase", "phase" to "x",
-      "detail" to "d", "title" to "t", "deviceId" to "dev-1", "ts" to now)
-    val other = boundary + ("directory" to "/repo") + ("phase" to "phase\nx")
-    assertFalse(PushMessageVerifier.sign("topsecret", boundary) == PushMessageVerifier.sign("topsecret", other))
   }
 
   /** A10: a refresh after an offline start must re-establish the stream and clear stale flags. */

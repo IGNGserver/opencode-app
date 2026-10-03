@@ -16,7 +16,7 @@ class TaskLedgerTest {
     store.rememberTask("server", TaskState("s", TaskPhase.COMPLETED, since = 200, finishedAt = 250), observedAt = 250)
     assertFalse("s" in store.acknowledgedTasks("server"))
   }
-  @Test fun delayedPushCannotOverwriteANewerForegroundRun() {
+  @Test fun olderTaskEventCannotOverwriteANewerForegroundRun() {
     val store = store()
     store.rememberTask("server", TaskState("s", TaskPhase.THINKING, since = 200), observedAt = 200)
     val next = store.rememberTask("server", TaskState("s", TaskPhase.COMPLETED, since = 100), observedAt = 150)

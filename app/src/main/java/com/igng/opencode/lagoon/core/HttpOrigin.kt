@@ -11,7 +11,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 internal data class HttpOrigin(val scheme: String, val host: String, val port: Int) {
   companion object {
     fun of(url: HttpUrl): HttpOrigin = HttpOrigin(url.scheme.lowercase(), url.host.lowercase(), url.port)
-    /** The cleartext target restriction used by pairing and push registration. */
+    /** The cleartext target restriction used by pairing. */
     fun allowsCleartext(host: String): Boolean = host in setOf("localhost", "127.0.0.1", "::1")
   }
 }

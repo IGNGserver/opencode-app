@@ -108,6 +108,6 @@ class PopupScopeRegressionTest {
       }
       searchFrom = close + 1
     }
-    assertTrue("服务器表单应至少包含访问密码与推送密钥两个掩码输入框", maskedFields >= 2)
+    assertTrue("服务器表单应包含访问密码掩码输入框", maskedFields >= 1)
   }
 }

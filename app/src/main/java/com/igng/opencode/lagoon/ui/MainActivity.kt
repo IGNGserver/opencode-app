@@ -37,7 +37,6 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.igng.opencode.lagoon.core.*
-import com.igng.opencode.lagoon.push.PushRegistration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -106,7 +105,6 @@ class MainActivity : ComponentActivity() {
       }
       LaunchedEffect(state.serverId) {
         if (navigationServer != state.serverId) { sessionStack = emptyList(); snapshots.clear(); navigationServer = state.serverId }
-        state.server?.let { PushRegistration(this@MainActivity).enableFor(it, controller.credentials(it.id), controller.deviceId()) }
       }
       LaunchedEffect(state.sessionId) {
         val id = state.sessionId

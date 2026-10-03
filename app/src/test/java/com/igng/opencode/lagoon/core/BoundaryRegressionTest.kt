@@ -1,7 +1,6 @@
 package com.igng.opencode.lagoon.core
 
 import android.content.SharedPreferences
-import com.igng.opencode.lagoon.push.PushMessageVerifier
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import okhttp3.mockwebserver.*
@@ -67,27 +66,6 @@ class BoundaryRegressionTest {
     val c=profileCredentials(p.url,p.url,s.credentials(p.id),"user",null)
     s.save(p.copy(name="Renamed"),c.password,c.cookie,c.username)
     assertEquals("cookie",s.credentials(p.id).cookie);assertEquals("",s.credentials(p.id).password)
-  }
-  @Test fun failedKeyDecryptionNeverAdoptsCiphertextAsASecret() {
-    val p=memoryPreferences();p.edit().putString("pluginSecret:srv","enc:v1:corrupted").commit()
-    assertEquals("",store(p).pluginSecret("srv"));assertEquals("enc:v1:corrupted",p.getString("pluginSecret:srv",null))
-  }
-  @Test fun pushDeviceAndSequenceAreVerifiedAcrossStoreRecreation() {
-    val p=memoryPreferences();val secret=memoryPreferences();p.edit().putString("deviceId","local-device").commit()
-    val s=store(p,secret);s.save(profile("https://server.example").copy(pluginSecret="push-key"),"password")
-    fun payload(device:String,seq:String):Map<String,String> {
-      val data=mapOf("version" to "3","sessionId" to "session","serverId" to "srv","directory" to "/repo","phase" to "COMPLETED","detail" to "done","title" to "Task","deviceId" to device,"sequence" to seq,"ts" to System.currentTimeMillis().toString())
-      return data+("sig" to PushMessageVerifier.sign("push-key",data))
-    }
-    assertFalse(PushMessageVerifier.verify(s,"srv",payload("other-device","1")))
-    assertTrue(PushMessageVerifier.verify(s,"srv",payload("local-device","2")))
-    val restored=store(p,secret)
-    assertFalse(PushMessageVerifier.verify(restored,"srv",payload("local-device","2")))
-    assertFalse(PushMessageVerifier.verify(restored,"srv",payload("local-device","1")))
-    assertTrue(PushMessageVerifier.verify(restored,"srv",payload("local-device","3")))
-    assertFalse(PushMessageVerifier.verify(restored,"srv",payload("local-device","4")+("version" to "2")))
-    s.save(profile("https://server.example").copy(pluginSecret=""),null)
-    assertFalse(PushMessageVerifier.verify(s,"srv",payload("local-device","5")))
   }
   @Test fun deletionDuringEncryptionCannotResurrectANewCacheKey()=runBlocking {
     val p=memoryPreferences();val entered=CountDownLatch(1);val release=CountDownLatch(1)
@@ -163,42 +141,6 @@ class BoundaryRegressionTest {
     val store=store();store.save(profile("https://x"),"p",credentialUsername="opencode")
     val p=store.profiles().single()
     assertFalse(p.islandHonor);assertFalse(p.islandOppoFluidCloud)
-  }
-  @Test fun backgroundPhasesTrackCountsAndExpireTerminalStates() {
-    val store=store();val now=System.currentTimeMillis()
-    store.recordPushPhase("srv","run", TaskPhase.THINKING.name, now)
-    store.recordPushPhase("srv","done", TaskPhase.COMPLETED.name, now)
-    store.recordPushPhase("srv","ask", TaskPhase.WAITING_QUESTION.name, now)
-    store.recordPushPhase("srv","boom", TaskPhase.FAILED.name, now)
-    assertEquals(TaskSummary(running=1, completed=1, waiting=1, failed=1), TaskSummary.fromPhaseNames(store.pushPhases("srv")))
-    // A read terminal result stops counting; a different server's phases are isolated.
-    store.acknowledgeTask("srv","done");store.acknowledgeTask("srv","boom")
-    assertEquals(TaskSummary(running=1, completed=0, waiting=1, failed=0),
-      TaskSummary.fromPhaseNames(store.pushPhases("srv"), store.acknowledgedTasks("srv")))
-    assertEquals(TaskSummary.EMPTY, TaskSummary.fromPhaseNames(store.pushPhases("other")))
-  }
-  @Test fun reCompletionMakesAReadResultUnreadAgain() {
-    val store=store();val now=System.currentTimeMillis()
-    store.recordPushPhase("srv","s", TaskPhase.THINKING.name, now)
-    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now)
-    store.acknowledgeTask("srv","s")
-    assertTrue(store.acknowledgedTasks("srv").contains("s"))
-    // A new run that reaches a terminal state again must be counted as unread.
-    store.recordPushPhase("srv","s", TaskPhase.THINKING.name, now + 1)
-    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now + 2)
-    assertFalse(store.acknowledgedTasks("srv").contains("s"))
-  }
-  @Test fun terminalTransitionFromIdleKeepsReadFlag() {
-    val store=store();val now=System.currentTimeMillis()
-    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now)
-    store.acknowledgeTask("srv","s")
-    // Re-reporting the same terminal phase (a duplicate push) must not resurrect an unread count.
-    store.recordPushPhase("srv","s", TaskPhase.COMPLETED.name, now + 1)
-    assertTrue(store.acknowledgedTasks("srv").contains("s"))
-  }
-  @Test fun fromPhaseNamesIgnoresUnknownPhases() {
-    val summary = TaskSummary.fromPhaseNames(mapOf("a" to "THINKING", "b" to "COMPLETED", "c" to "NOT_A_PHASE", "d" to ""))
-    assertEquals(TaskSummary(running=1, completed=1), summary)
   }
   @Test fun repeatedCursorFailsInsteadOfReturningPartialAuthoritativeData()=runBlocking {
     MockWebServer().use { s ->

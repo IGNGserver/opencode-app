@@ -54,7 +54,7 @@ class TaskMonitorService : Service() {
           tracked.toList().forEach { key ->
             val (trackedServerId, trackedSessionId) = key
             // This service monitors only the current connection. Switching or removing a profile
-            // drops its local tracking; independent companion pushes remain available.
+            // drops its tracking.
             if (trackedServerId != state.serverId || state.profiles.none { it.id == trackedServerId && it.notifications } ||
               state.connected && !state.degraded && state.catalogComplete && state.sessions.none { it.id == trackedSessionId }) {
               tracked.remove(key)
@@ -62,8 +62,8 @@ class TaskMonitorService : Service() {
             }
             val task = state.tasks[trackedSessionId] ?: return@forEach
             if (task.phase in TERMINAL_PHASES) tracked.remove(key)
-            // The controller/verified push publisher owns task notifications. This service only
-            // keeps the SSE monitoring process alive; it must never republish a result.
+            // The controller owns task notifications. This service only keeps the SSE monitoring
+            // process alive; it must never republish a result.
           }
           if (tracked.isEmpty()) {
             // DETACH would leave the monitoring notification behind; remove it and then stop.
